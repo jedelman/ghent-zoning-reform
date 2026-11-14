@@ -8,7 +8,7 @@ Everything comes from the City of Norfolk's public GIS server and open-data port
   Street centerline gisshare.norfolk.gov OpenData/Public_Works/FeatureServer/1
   Addresses        data.norfolk.gov      ere7-kake  (Address Information)
   Assessment FY26  data.norfolk.gov      m5ya-5grb  (use, class, year built, lot size; owner is NOT kept)
-  Assessor photos  api.spatialest.com    the city assessor's photo index (the photos stay on gisshare.norfolk.gov)
+  Assessor photos  gisshare.norfolk.gov  provalimages/, the assessor's street photos, filed by parcel ID
   Trees            data.norfolk.gov      cmvv-agyb  (City Tree Inventory: species, trunk diameter, location)
                    (The Significant Trees list, jz6u-9g3c, is left out: its coordinates are rounded to three
                    decimal places, about 100 m, too coarse to stand a tree on a lot.)
@@ -25,6 +25,7 @@ import json
 import math
 import os
 import time
+import urllib.error
 import urllib.parse
 import urllib.request
 from datetime import date
@@ -38,11 +39,56 @@ PARCELS = f"{GIS}/OpenData/Parcels/FeatureServer/1"
 BUILDINGS = f"{GIS}/InteractiveMapper/Property_Information_Group_IM/MapServer/1"
 STREETS = f"{GIS}/OpenData/Public_Works/FeatureServer/1"
 SOCRATA = "https://data.norfolk.gov/resource"
-PHOTOS = "https://api.spatialest.com/v1/va/norfolk/images?type=photo&json=1&id="
+PHOTOS = "https://gisshare.norfolk.gov/provalimages/001"
 
 FT = 0.3048                      # US survey foot ≈ international foot at this precision
 UA = {"User-Agent": "ghent-streets-explorer/1.0 (+https://github.com/jedelman/ghent-zoning-reform)"}
 OUT = os.path.join(os.path.dirname(__file__), "../../explorer/data/ghent.json")
+
+
+def head(url, tries=3):
+    """Last-Modified of a file on the server ('' if it has none), or None if the file isn't there.
+    A 404 is an answer; a timeout or dropped connection is retried."""
+    for i in range(tries):
+        try:
+            with urllib.request.urlopen(urllib.request.Request(url, headers=UA, method="HEAD"), timeout=30) as r:
+                return r.headers.get("Last-Modified") or ""
+        except urllib.error.HTTPError:
+            return None
+        except Exception:
+            time.sleep(1 + i)
+    return None
+
+
+def assessor_photo(pid):
+    """The newest of the assessor's street photos of a parcel, on the city's own server.
+
+    The photos are filed by parcel ID: 001/<first four digits>/<last four><R or C><card><n>.jpg, where
+    R marks a residential card and C a commercial one, and n counts the photos on the card (1, 2, 3, ...).
+    (The AIR viewer's photo index is a vendor's API whose terms forbid scripted use, so it isn't used.)
+    The newest is the one most recently uploaded; photos moved in the 2024 migration share a date, so
+    among those the higher number wins, which is the later photo.
+    """
+    found = []
+    for card in ("R01", "C01", "R02", "C02", "C00", "R00"):
+        for n in range(1, 10):   # a card's numbering can skip its first photo, so a gap at 1 doesn't end it
+            url = f"{PHOTOS}/{pid[:4]}/{pid[4:8]}{card}{n}.jpg"
+            modified = head(url)
+            if modified is not None:
+                found.append((modified, card, n, url))
+            elif n >= 2:
+                break
+            time.sleep(0.1)
+    if not found:
+        return None
+    from email.utils import parsedate_to_datetime
+    def key(f):
+        try:
+            when = parsedate_to_datetime(f[0]).timestamp()
+        except Exception:
+            when = 0
+        return (when, f[2])
+    return max(found, key=key)[3]
 
 
 def get_json(url, params=None, tries=3):
@@ -270,16 +316,8 @@ def main():
         a = assess.get(p["gpin"], {})
         p["pid"] = a.get("parcel_id")
         p["photo"] = None
-        if p["corner"] and p["pid"]:
-            try:
-                urls = get_json(PHOTOS + urllib.parse.quote(p["pid"]))
-                if urls:
-                    # The index gives Windows paths (001\\0031\\1300C012.jpg). The server takes forward
-                    # slashes as well, and some proxies refuse a backslash in a path.
-                    p["photo"] = urls[0].replace("\\", "/")
-            except Exception:
-                pass
-            time.sleep(0.2)
+        if p["corner"] and p["pid"] and len(p["pid"]) == 8 and p["pid"].isdigit():
+            p["photo"] = assessor_photo(p["pid"])
 
     # 7. Trees: the city's inventory, mostly street and public trees. Diameter is the trunk at breast
     #    height, in inches: a measurement where there is one, else the middle of its range, else 0 (unknown).
@@ -340,7 +378,7 @@ def main():
                 "zoning": ZONING, "parcels": PARCELS, "buildings": BUILDINGS, "streets": STREETS,
                 "addresses": "https://data.norfolk.gov/d/ere7-kake",
                 "assessment": "https://data.norfolk.gov/d/m5ya-5grb",
-                "photos": "City of Norfolk Real Estate Assessor (via air.norfolk.gov)",
+                "photos": "City of Norfolk Real Estate Assessor (gisshare.norfolk.gov)",
             },
             "heights": "approximate: the city's building 'Elevation' field read as roof elevation in feet, less ~7 ft of ground",
         },
