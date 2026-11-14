@@ -274,7 +274,7 @@ function initThree() {
   const camera = new THREE.PerspectiveCamera(38, 1, 0.5, 5000);
   const controls = new OrbitControls(camera, renderer.domElement);
   controls.enableDamping = true;
-  controls.maxPolarAngle = 1.42;
+  controls.maxPolarAngle = 1.565;   // down to eye level, never under the ground
   controls.minDistance = 12;
   controls.maxDistance = 1800;
   controls.screenSpacePanning = false;
@@ -390,6 +390,7 @@ function buildBuildings() {
       const m = new THREE.Mesh(g, MAT.building);
       m.castShadow = m.receiveShadow = true;
       m.userData.gpin = p.gpin;
+      b.mesh = m;
       p.meshes.push(m);
       three.scene.add(m);
       three.pickables.push(m);
@@ -502,11 +503,38 @@ function frontage(p) {
     if (!near) continue;
     const toward = ((near.q[0] - mid[0]) * n[0] + (near.q[1] - mid[1]) * n[1]) / (near.d || 1);
     if (toward < 0.5) continue;  // must face the street, within about 60°
-    edges.push({ mid, dir, n, len, h: b.h, street: near.d });
+    edges.push({ mid, dir, n, len, h: b.h, street: near.d, a, c, i, b });
   }
   if (!edges.length) return null;
-  const front = Math.min(...edges.map((e) => e.street));
-  return edges.filter((e) => e.street <= front + 2.5).reduce((a, c) => (c.len > a.len ? c : a));
+  const nearest = Math.min(...edges.map((e) => e.street));
+  const best = edges.filter((e) => e.street <= nearest + 2.5).reduce((x, y) => (y.len > x.len ? y : x));
+
+  // A corner: an end of that face where the next wall along faces the lot's second street.
+  if (p.corner && p.streets?.[1]) {
+    const lines2 = streetsByName.get(p.streets[1]) || [];
+    const n = b.poly.length;
+    const ends = [
+      { v: best.i, P: b.poly[(best.i - 1 + n) % n], Q: best.a, other: b.poly[(best.i - 1 + n) % n], awayA: best.dir },
+      { v: (best.i + 1) % n, P: best.c, Q: b.poly[(best.i + 2) % n], other: b.poly[(best.i + 2) % n], awayA: [-best.dir[0], -best.dir[1]] },
+    ];
+    let pick = null;
+    for (const e of ends) {
+      const V = b.poly[e.v];
+      const lenB = Math.hypot(e.other[0] - V[0], e.other[1] - V[1]);
+      if (lenB < 3) continue;
+      const ed = [(e.Q[0] - e.P[0]) / lenB, (e.Q[1] - e.P[1]) / lenB];
+      const nB = cw ? [-ed[1], ed[0]] : [ed[1], -ed[0]];
+      const mid = [(e.P[0] + e.Q[0]) / 2, (e.P[1] + e.Q[1]) / 2];
+      const near = nearestOnLines(mid, lines2);
+      if (!near || near.d > best.street + 10) continue;
+      if (((near.q[0] - mid[0]) * nB[0] + (near.q[1] - mid[1]) * nB[1]) / (near.d || 1) < 0.5) continue;
+      const toCorner = nearestOnLines(V, lines2).d;
+      const awayB = [(e.other[0] - V[0]) / lenB, (e.other[1] - V[1]) / lenB];
+      if (!pick || toCorner < pick.toCorner) pick = { v: e.v, awayA: e.awayA, awayB, nB, lenA: best.len, lenB, toCorner };
+    }
+    if (pick) best.corner = pick;
+  }
+  return best;
 }
 
 // ── Camera ──
@@ -515,9 +543,24 @@ function flyHome(instant = false) {
   fly(to, instant);
 }
 
-function flyTo(p) {
+function flyTo(p, view = null) {
   const f = p.front;
   let target, pos;
+  if (view && f) {
+    // Stand on the far side of the street at eye height, looking at the shop.
+    if (view.corner) {
+      const { V, nD } = view.corner;
+      target = to3(V[0] + nD[0] * 1.5, V[1] + nD[1] * 1.5, 1.95);
+      pos = to3(V[0] + nD[0] * 14, V[1] + nD[1] * 14, 2.0);
+    } else {
+      const { o, d, n } = view.site;
+      const back = Math.max(12, Math.min(19, f.street + 5));
+      target = to3(o[0] + n[0] * 1.5, o[1] + n[1] * 1.5, 1.95);
+      pos = to3(o[0] + n[0] * back + d[0] * 4.5, o[1] + n[1] * back + d[1] * 4.5, 2.0);
+    }
+    fly({ pos, target });
+    return;
+  }
   if (f) {
     const mid = to3(f.mid[0], f.mid[1], 0);
     const n = new THREE.Vector3(f.n[0], 0, -f.n[1]);
@@ -620,16 +663,6 @@ function windowTexture(w) {
   return t;
 }
 
-function person(color, seated = false) {
-  const g = new THREE.Group();
-  const body = new THREE.Mesh(new THREE.CylinderGeometry(0.19, 0.25, seated ? 0.75 : 1.15, 8), std(color));
-  body.position.y = seated ? 0.85 : 0.6;
-  const head = new THREE.Mesh(new THREE.SphereGeometry(0.17, 10, 8), std(0xd9b38c));
-  head.position.y = seated ? 1.38 : 1.36;
-  g.add(body, head);
-  g.traverse((o) => { if (o.isMesh) o.castShadow = true; });
-  return g;
-}
 
 function table(top = 0xf2ece0) {
   const g = new THREE.Group();
@@ -747,137 +780,974 @@ function stringLights(W, color) {
   return g;
 }
 
-function buildKit(kit, f) {
-  const group = new THREE.Group();
-  const W = Math.max(3, Math.min(f.len - 1, 11));
-  const u = new THREE.Vector3(f.dir[0], 0, -f.dir[1]);
-  const n = new THREE.Vector3(f.n[0], 0, -f.n[1]);
-  const up = new THREE.Vector3(0, 1, 0);
-  if (new THREE.Vector3().crossVectors(u, up).dot(n) < 0) u.negate();
-  group.matrixAutoUpdate = true;
-  group.position.copy(to3(f.mid[0], f.mid[1], 0));
-  group.quaternion.setFromRotationMatrix(new THREE.Matrix4().makeBasis(u, up, n));
 
+// ── Storefront architecture ──
+// Grounded in Norfolk's Historic District Design Guidelines (adopted by the Architectural Review
+// Board, May 26, 2026): keep doors and windows where they are on a primary elevation, keep front
+// porches open, keep storefront glass transparent, canvas awnings shading the first floor, signs in
+// sign bands, on windows and on awning panels, lit from outside. So the kind of storefront follows
+// what the building already is (see variantFor):
+//   shop    commercial buildings: the guidelines' 20th-century storefront (piers, bulkheads,
+//           display glass, transom, sign band and cornice) with a recessed entry and splayed
+//           display windows. The ground floor is notched and the animation pushes the entrance in.
+//   corner  commercial buildings at the corner: the corner cut back at 45° on a cast-iron column,
+//           the door on the diagonal, storefront bays down both streets.
+//   porch   houses: the porch stays open and the windows and door stay put; the shop shows in lit,
+//           lettered windows, a sign hung from the porch, tables on the porch.
+//   flats   apartment buildings: their punched windows lit and lettered, the entry set back up a
+//           few steps under a canvas canopy that carries the name.
+// Variety (paint, trim, bay rhythm, entry position, columns) comes from a random seeded by the
+// lot's GPIN, so a lot always gets the same storefront.
+
+const HOUSE = /single family|duplex|triplex|fourplex/i;
+const PAINTS = {
+  coffee: ['#2f4a3a', '#34503c', '#2f5d62', '#3e5a3a'],
+  books: ['#6b2430', '#5a2a2a', '#7a3b2e', '#4a2a3a'],
+  bistro: ['#1f2a44', '#1a1714', '#3b2a3f', '#22313b'],
+  studio: ['#1d1f22', '#2b2d31', '#3a3d42'],
+};
+const TRIMS = ['#efe6d2', '#e2d3ac', '#f6f1e7', '#c9b78a'];
+const BRICKS = ['#8a4a36', '#9a5a40', '#7a3f30', '#a8705a'];
+const ICONS = { coffee: 'cup', books: 'book', bistro: 'glass', studio: 'square' };
+
+function rngFor(seed) {
+  let h = 2166136261;
+  for (const ch of String(seed)) { h ^= ch.charCodeAt(0); h = Math.imul(h, 16777619); }
+  return () => {
+    h += 0x6d2b79f5;
+    let t = h;
+    t = Math.imul(t ^ (t >>> 15), t | 1);
+    t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+}
+const pickOf = (rng, arr) => arr[Math.floor(rng() * arr.length)];
+const sub = (a, b) => [a[0] - b[0], a[1] - b[1]];
+const add = (a, b, s = 1) => [a[0] + b[0] * s, a[1] + b[1] * s];
+const unit = (v) => { const L = Math.hypot(v[0], v[1]) || 1; return [v[0] / L, v[1] / L]; };
+
+function variantFor(p, f) {
+  const commercial = /commercial/i.test(p.use || '');
+  // The guidelines care about the building, not the business. A commercial use in a house-sized
+  // building from before the 1920s is a converted house and keeps its porch: 626 W Olney Rd, a
+  // 1906 house that's now a restaurant, is the case in point.
+  const convertedHouse = commercial && p.built && p.built < 1926 && Math.abs(polyArea(f.b.poly)) < 200;
+  if (commercial && !convertedHouse) return f.corner ? 'corner' : 'shop';
+  if (convertedHouse || HOUSE.test(p.use || '')) return 'porch';
+  return 'flats';
+}
+
+// Gold-leaf lettering for a shop window: the name in an arc, on a transparent ground.
+function letteringTex(text, font) {
+  return canvasTex(512, 256, (g, w, h) => {
+    g.clearRect(0, 0, w, h);
+    g.fillStyle = '#d9b25a';
+    g.strokeStyle = 'rgba(60,40,10,0.55)';
+    g.lineWidth = 3;
+    g.font = font.replace(/\d+px/, '64px');
+    g.textAlign = 'center'; g.textBaseline = 'middle';
+    const chars = [...text], R = 330, spread = Math.min(1.1, chars.length * 0.13);
+    chars.forEach((ch, i) => {
+      const a = -spread / 2 + (spread * (i + 0.5)) / chars.length;
+      g.save();
+      g.translate(w / 2 + Math.sin(a) * R, h / 2 + 300 - Math.cos(a) * R);
+      g.rotate(a);
+      g.strokeText(ch, 0, 0); g.fillText(ch, 0, 0);
+      g.restore();
+    });
+  });
+}
+
+// A punched window as the building already has it: trim, sill and head, a lit double-hung sash.
+function punchedWindow(ctx, parent, cx, sill, w, h, look, lettering = null) {
+  const M = look.mats;
+  const g = new THREE.Group();
+  g.position.set(cx, 0, 0);
+  box(g, w + 0.24, 0.1, 0.18, 0, sill - 0.05, 0.08, M.trim);
+  box(g, w + 0.3, 0.16, 0.12, 0, sill + h + 0.08, 0.06, M.trim);
+  for (const sd of [-1, 1]) box(g, 0.1, h, 0.1, sd * (w / 2 + 0.05), sill + h / 2, 0.05, M.trim);
+  const glass = box(g, w, h, 0.04, 0, sill + h / 2, 0.02, M.glass, false);
+  ctx.glass.push(glass.material);
+  box(g, w, 0.06, 0.07, 0, sill + h * 0.52, 0.05, M.trim, false);
+  if (lettering) {
+    const plane = new THREE.Mesh(new THREE.PlaneGeometry(w * 0.92, w * 0.46), new THREE.MeshBasicMaterial({ map: lettering, transparent: true, depthWrite: false }));
+    plane.position.set(0, sill + h * 0.3, 0.06);
+    g.add(plane);
+  }
+  parent.add(g);
+  return g;
+}
+
+// The ground-floor footprint with an entry notch cut into edge i, between s0 and s1 metres
+// from its start, `depth` deep, the sides splayed by `splay`.
+function notchPoly(poly, i, s0, s1, depth, splay) {
+  const a = poly[i], c = poly[(i + 1) % poly.length];
+  const dir = unit(sub(c, a));
+  const inward = polyArea(poly) < 0 ? [dir[1], -dir[0]] : [-dir[1], dir[0]];
+  const p1 = add(a, dir, s0), p2 = add(a, dir, s1);
+  const d = Math.max(0.02, depth);
+  const p1i = add(add(p1, dir, splay * (d / Math.max(depth, 0.02))), inward, d);
+  const p2i = add(add(p2, dir, -splay * (d / Math.max(depth, 0.02))), inward, d);
+  return [...poly.slice(0, i + 1), p1, p1i, p2i, p2, ...poly.slice(i + 1)];
+}
+
+// The footprint with corner v cut back k metres along both edges.
+function chamferPoly(poly, v, k) {
+  const n = poly.length, V = poly[v];
+  const prev = poly[(v - 1 + n) % n], next = poly[(v + 1) % n];
+  const kk = Math.max(0.02, k);
+  return [...poly.slice(0, v), add(V, unit(sub(prev, V)), kk), add(V, unit(sub(next, V)), kk), ...poly.slice(v + 1)];
+}
+
+function extrudeMesh(poly, y0, y1, mat) {
+  const g = new THREE.ExtrudeGeometry(shapeOf(poly), { depth: y1 - y0, bevelEnabled: false });
+  g.rotateX(-Math.PI / 2);
+  const m = new THREE.Mesh(g, mat);
+  m.position.y = y0;
+  m.castShadow = m.receiveShadow = true;
+  return m;
+}
+
+// A group standing on the ground at 2D point o, local x along 2D direction d, local z along the
+// outward normal n, y up. If that basis would be left-handed, x runs along -d instead (flipped).
+function frame(o, d, n) {
+  const g = new THREE.Group();
+  const u = new THREE.Vector3(d[0], 0, -d[1]);
+  const w = new THREE.Vector3(n[0], 0, -n[1]);
+  const up = new THREE.Vector3(0, 1, 0);
+  let flipped = false;
+  if (new THREE.Vector3().crossVectors(u, up).dot(w) < 0) { u.negate(); flipped = true; }
+  g.position.copy(to3(o[0], o[1], 0));
+  g.quaternion.setFromRotationMatrix(new THREE.Matrix4().makeBasis(u, up, w));
+  return { g, flipped };
+}
+
+function box(parent, w, h, d, x, y, z, mat, cast = true) {
+  const m = new THREE.Mesh(new THREE.BoxGeometry(w, h, d), mat);
+  m.position.set(x, y, z);
+  m.castShadow = cast;
+  m.receiveShadow = true;
+  parent.add(m);
+  return m;
+}
+
+// A thin slab standing on the line from (x0, z0) to (x1, z1) in a frame's ground plane.
+function slab(parent, x0, z0, x1, z1, y0, y1, t, mat) {
+  const L = Math.hypot(x1 - x0, z1 - z0);
+  const m = new THREE.Mesh(new THREE.BoxGeometry(L, y1 - y0, t), mat);
+  m.position.set((x0 + x1) / 2, (y0 + y1) / 2, (z0 + z1) / 2);
+  m.rotation.y = Math.atan2(-(z1 - z0), x1 - x0);
+  m.castShadow = true;
+  parent.add(m);
+  return m;
+}
+
+function canvasTex(w, h, draw) {
+  const c = document.createElement('canvas');
+  c.width = w; c.height = h;
+  draw(c.getContext('2d'), w, h);
+  const t = new THREE.CanvasTexture(c);
+  t.colorSpace = THREE.SRGBColorSpace;
+  t.anisotropy = 4;
+  return t;
+}
+
+// A painted sign band: the shop's name in the trim colour on the paint colour, sized to the band.
+function signBandTex(text, font, paint, trim, aspect) {
+  const h = 128, w = Math.max(256, Math.min(2048, Math.round(h * aspect)));
+  return canvasTex(w, h, (g) => {
+    g.fillStyle = paint; g.fillRect(0, 0, w, h);
+    g.strokeStyle = trim; g.lineWidth = 4; g.strokeRect(8, 10, w - 16, h - 20);
+    g.fillStyle = trim;
+    g.font = font.replace(/\d+px/, '78px');
+    g.textAlign = 'center'; g.textBaseline = 'middle';
+    g.fillText(text, w / 2, h / 2 + 4);
+  });
+}
+
+function iconTex(kind, paint, trim) {
+  return canvasTex(256, 192, (g, w, h) => {
+    g.fillStyle = paint; g.fillRect(0, 0, w, h);
+    g.strokeStyle = trim; g.fillStyle = trim; g.lineWidth = 9; g.lineCap = 'round';
+    g.strokeRect(10, 10, w - 20, h - 20);
+    const cx = w / 2, cy = h / 2;
+    g.beginPath();
+    if (kind === 'cup') {
+      g.moveTo(cx - 40, cy - 22); g.lineTo(cx - 32, cy + 32); g.lineTo(cx + 32, cy + 32); g.lineTo(cx + 40, cy - 22); g.closePath(); g.fill();
+      g.beginPath(); g.arc(cx + 48, cy, 16, -Math.PI / 2, Math.PI / 2); g.stroke();
+      g.beginPath(); g.moveTo(cx - 14, cy - 34); g.quadraticCurveTo(cx - 4, cy - 48, cx - 14, cy - 62); g.moveTo(cx + 10, cy - 34); g.quadraticCurveTo(cx + 20, cy - 48, cx + 10, cy - 62); g.stroke();
+    } else if (kind === 'book') {
+      g.moveTo(cx, cy - 30); g.lineTo(cx - 62, cy - 40); g.lineTo(cx - 62, cy + 34); g.lineTo(cx, cy + 44); g.lineTo(cx + 62, cy + 34); g.lineTo(cx + 62, cy - 40); g.closePath(); g.stroke();
+      g.beginPath(); g.moveTo(cx, cy - 30); g.lineTo(cx, cy + 44); g.stroke();
+    } else if (kind === 'glass') {
+      g.moveTo(cx - 30, cy - 50); g.quadraticCurveTo(cx - 30, cy + 4, cx, cy + 6); g.quadraticCurveTo(cx + 30, cy + 4, cx + 30, cy - 50); g.closePath(); g.fill();
+      g.beginPath(); g.moveTo(cx, cy + 6); g.lineTo(cx, cy + 42); g.moveTo(cx - 24, cy + 46); g.lineTo(cx + 24, cy + 46); g.stroke();
+    } else {
+      g.strokeRect(cx - 40, cy - 40, 80, 80); g.beginPath(); g.moveTo(cx - 40, cy + 40); g.lineTo(cx + 40, cy - 40); g.stroke();
+    }
+  });
+}
+
+function valanceTex(stripes, paint) {
+  const t = canvasTex(256, 48, (g, w, h) => {
+    for (let i = 0; i < 8; i++) { g.fillStyle = stripes ? stripes[i % 2] : paint; g.fillRect(i * 32, 0, 32, h); }
+    g.globalCompositeOperation = 'destination-out';
+    for (let i = 0; i < 8; i++) { g.beginPath(); g.arc(i * 32 + 16, h + 4, 14, 0, Math.PI * 2); g.fill(); }
+  });
+  t.wrapS = THREE.RepeatWrapping;
+  return t;
+}
+
+function mosaicTex() {
+  return canvasTex(256, 256, (g, w) => {
+    g.fillStyle = '#efe8da'; g.fillRect(0, 0, w, w);
+    g.strokeStyle = '#2b2622'; g.lineWidth = 2;
+    for (let y = 0; y < 9; y++) for (let x = 0; x < 9; x++) { g.strokeRect(x * 30 + (y % 2) * 15 - 15, y * 30, 30, 30); }
+    g.strokeStyle = '#6b2430'; g.lineWidth = 10; g.strokeRect(12, 12, w - 24, w - 24);
+  });
+}
+
+function transomTex() {
+  return canvasTex(256, 64, (g, w, h) => {
+    g.fillStyle = '#f4e3bd'; g.fillRect(0, 0, w, h);
+    g.strokeStyle = '#7a6a4a'; g.lineWidth = 2;
+    for (let x = 0; x < w; x += 16) { g.beginPath(); g.moveTo(x, 0); g.lineTo(x, h); g.stroke(); }
+    for (let y = 0; y < h; y += 16) { g.beginPath(); g.moveTo(0, y); g.lineTo(w, y); g.stroke(); }
+  });
+}
+
+// One storefront run along a facade: from 2D point S, `L` metres along d, facing n. Heights hang
+// from the storefront top ST (the foot of the sign band), so a low ground floor gets shorter glass.
+// entry: { at, w, depth, splay } in metres along the run (the building is notched to match).
+function buildRun(ctx, S, d, n, L, opts) {
+  const { kit, look, G, entry } = opts;
+  const flip = isFlipped(d, n);
+  const { g } = frame(flip ? add(S, d, L) : S, d, n);   // flipped frames run x from the far end
+  const X = (r) => (flip ? L - r : r);
+  const M = look.mats;
+  const ST = G - 0.62;
+  const glassTop = ST - 0.55;
+
+  // Bays: piers about 3.3 m apart; the entry takes its own span.
+  const nb = Math.max(1, Math.round(L / 3.3));
+  const bounds = Array.from({ length: nb + 1 }, (_, i) => (L * i) / nb);
+  const e0 = entry ? entry.at - entry.w / 2 : null, e1 = entry ? entry.at + entry.w / 2 : null;
+  const spans = [];
+  for (let i = 0; i < nb; i++) {
+    const a = bounds[i], b = bounds[i + 1];
+    if (entry && b > e0 && a < e1) {
+      if (e0 - a > 0.9) spans.push([a, e0 - 0.18]);
+      if (b - e1 > 0.9) spans.push([e1 + 0.18, b]);
+      continue;
+    }
+    spans.push([a, b]);
+  }
+  const piers = new Set(bounds.filter((x) => !entry || x <= e0 - 0.3 || x >= e1 + 0.3));
+  if (entry) { piers.add(e0 - 0.18); piers.add(e1 + 0.18); }
+
+  const grow = [];   // [mesh, delay]: rises into place
+  for (const x of piers) {
+    grow.push([box(g, 0.36, ST, 0.22, X(x), ST / 2, 0.09, M.pier), 0]);
+    grow.push([box(g, 0.3, 0.26, 0.3, X(x), ST - 0.1, 0.18, M.trim), 0.1]);
+  }
+  for (const [a0, b0] of spans) {
+    const a = a0 + 0.2, b = b0 - 0.2, w = b - a, cx = X((a + b) / 2);
+    if (w < 0.6) continue;
+    grow.push([box(g, w, 0.55, 0.14, cx, 0.275, 0.06, M.paint), 0.05]);
+    if (look.bulk === 'panel') grow.push([box(g, w - 0.2, 0.34, 0.02, cx, 0.28, 0.14, M.trim, false), 0.08]);
+    grow.push([box(g, w + 0.1, 0.07, 0.24, cx, 0.58, 0.08, M.trim), 0.08]);
+    const glass = box(g, w, glassTop - 0.62, 0.05, cx, (glassTop + 0.62) / 2, 0.03, M.glass, false);
+    ctx.glass.push(glass.material);
+    grow.push([glass, 0.1]);
+    if (w > 2.4) grow.push([box(g, 0.07, glassTop - 0.62, 0.08, cx, (glassTop + 0.62) / 2, 0.06, M.paint), 0.12]);
+    grow.push([box(g, w + 0.05, 0.08, 0.12, cx, glassTop + 0.04, 0.06, M.paint), 0.12]);
+    grow.push([box(g, w, 0.42, 0.04, cx, ST - 0.26, 0.03, M.transom, false), 0.14]);
+    if (look.awning) {   // a canvas awning per bay, with a scalloped valance
+      const pivot = new THREE.Group();
+      pivot.position.set(cx, ST - 0.02, 0.14);
+      const deck = new THREE.Mesh(new THREE.BoxGeometry(w + 0.15, 0.03, 1.25), M.awning);
+      deck.position.z = 0.62;
+      deck.castShadow = true;
+      const val = new THREE.Mesh(new THREE.PlaneGeometry(w + 0.15, 0.24), M.valance);
+      val.position.set(0, -0.12, 1.25);
+      pivot.add(deck, val);
+      pivot.rotation.x = -Math.PI / 2;
+      pivot.visible = false;
+      g.add(pivot);
+      ctx.awnings.push([pivot, look.awnTilt]);
+    }
+  }
+
+  if (entry) {
+    const D = entry.depth, sp = entry.splay;
+    const x0 = X(e0), x1 = X(e1), xi0 = X(e0 + sp), xi1 = X(e1 - sp), xm = X(entry.at);
+    for (const [xa, xb] of [[x0, xi0], [x1, xi1]]) {   // splayed display windows leading in
+      grow.push([slab(g, xa, 0, xb, -D, 0, 0.55, 0.12, M.paint), 0.12]);
+      const gl = slab(g, xa, 0, xb, -D, 0.6, glassTop, 0.05, M.glass);
+      ctx.glass.push(gl.material);
+      grow.push([gl, 0.14]);
+      grow.push([slab(g, xa, 0, xb, -D, glassTop + 0.06, ST, 0.04, M.transom), 0.16]);
+    }
+    // The door at the back of the recess: a painted leaf with a glass light, under a transom.
+    const back = Math.abs(xi1 - xi0);
+    const door = new THREE.Group();
+    door.position.set(xm, 0, -D + 0.04);
+    box(door, 0.98, 2.24, 0.06, 0, 1.12, 0, M.paint);
+    ctx.glass.push(box(door, 0.66, 1.2, 0.02, 0, 1.45, 0.04, M.glass, false).material);
+    box(door, 0.06, 0.06, 0.08, 0.36, 1.05, 0.07, M.brass, false);
+    box(door, 0.9, 0.18, 0.02, 0, 0.14, 0.04, M.brass, false);
+    box(door, Math.max(1.0, back), 0.1, 0.12, 0, 2.3, 0, M.trim);
+    box(door, Math.max(1.0, back), ST - 2.36, 0.04, 0, (2.36 + ST) / 2, 0, M.transom, false);
+    if (back > 1.5) for (const sd of [-1, 1]) ctx.glass.push(box(door, (back - 1.1) / 2, 2.2, 0.04, sd * (0.55 + (back - 1.1) / 4), 1.12, 0, M.glass, false).material);
+    g.add(door);
+    grow.push([door, 0.16]);
+    // Mosaic underfoot and a ceiling overhead, the vestibule's own small room.
+    const shape = new THREE.Shape([new THREE.Vector2(x0, 0), new THREE.Vector2(x1, 0), new THREE.Vector2(xi1, D), new THREE.Vector2(xi0, D)]);
+    for (const [y, mat] of [[0.02, M.mosaic], [ST, M.trim]]) {
+      const plane = new THREE.Mesh(new THREE.ShapeGeometry(shape), mat);
+      plane.rotation.x = y > 1 ? Math.PI / 2 : -Math.PI / 2;
+      if (y > 1) plane.scale.y = -1;
+      plane.position.y = y;
+      plane.receiveShadow = true;
+      g.add(plane);
+    }
+    for (const xs of [X(e0 - 0.18), X(e1 + 0.18)]) {   // sconces either side
+      const lamp = new THREE.Mesh(new THREE.BoxGeometry(0.16, 0.26, 0.16), M.lantern);
+      lamp.position.set(xs, Math.min(2.25, ST - 0.5), 0.32);
+      g.add(lamp);
+      ctx.lanterns.push(lamp);
+    }
+  }
+
+  // Gooseneck lamps over the sign band: the guidelines want signs lit from outside.
+  const nGoose = Math.max(2, Math.round(L / 2.6));
+  for (let i = 0; i < nGoose; i++) {
+    const gx = X(((i + 0.5) * L) / nGoose);
+    const arm = box(g, 0.035, 0.035, 0.55, gx, G + 0.12, 0.38, M.iron, false);
+    arm.rotation.x = -0.35;
+    const shade = new THREE.Mesh(new THREE.ConeGeometry(0.12, 0.14, 10, 1, true), M.lantern);
+    shade.position.set(gx, G + 0.02, 0.62);
+    g.add(shade);
+    ctx.lanterns.push(shade);
+  }
+
+  // The sign band and cornice over the whole run.
+  const band = box(g, L - 0.1, 0.56, 0.12, X(L / 2), ST + 0.28, 0.16, new THREE.MeshStandardMaterial({
+    map: signBandTex(kit.sign, kit.signFont, look.paint, look.trim, (L - 0.1) / 0.56), roughness: 0.7,
+  }));
+  band.scale.x = 0.001;
+  ctx.bands.push(band);
+  grow.push([box(g, L + 0.3, 0.16, 0.42, X(L / 2), G - 0.04, 0.2, M.trim), 0.2]);
+
+  for (const [m] of grow) m.scale.y = 0.001;
+  ctx.grow.push(...grow);
+  return g;
+}
+
+// frame() flips x when (d, up, n) would be left-handed; a flipped run is placed from its far end.
+function isFlipped(d, n) {
+  const u = new THREE.Vector3(d[0], 0, -d[1]), w = new THREE.Vector3(n[0], 0, -n[1]);
+  return new THREE.Vector3().crossVectors(u, new THREE.Vector3(0, 1, 0)).dot(w) < 0;
+}
+
+function bladeSign(ctx, parent, x, y, z, kit, look) {
+  const arm = new THREE.Group();
+  arm.position.set(x, y, z);
+  box(arm, 0.05, 0.05, 1.05, 0, 0, 0.52, look.mats.iron);
+  box(arm, 0.04, 0.4, 0.04, 0, -0.18, 0.05, look.mats.iron);
+  const icon = new THREE.MeshStandardMaterial({ map: iconTex(ICONS[kit.id], look.paint, look.trim) });
+  const panel = new THREE.Mesh(new THREE.BoxGeometry(0.03, 0.46, 0.62), [icon, icon, look.mats.paint, look.mats.paint, look.mats.paint, look.mats.paint]);
+  panel.position.set(0, -0.32, 0.62);
+  panel.castShadow = true;
+  arm.add(panel);
+  parent.add(arm);
+  ctx.blades.push(arm);
+}
+
+function tree(x, z) {
+  const g = new THREE.Group();
+  const trunk = new THREE.Mesh(new THREE.CylinderGeometry(0.14, 0.2, 3.2, 7), std(0x5a4636));
+  trunk.position.y = 1.6;
+  const crown = new THREE.Mesh(new THREE.IcosahedronGeometry(2.3, 1), std(DARK ? 0x2f4a32 : 0x5f7d4f, { flatShading: true }));
+  crown.position.y = 4.9;
+  crown.scale.set(1, 0.85, 1);
+  const crown2 = crown.clone();
+  crown2.scale.set(0.7, 0.6, 0.7);
+  crown2.position.set(0.9, 5.9, -0.4);
+  g.add(trunk, crown, crown2);
+  g.traverse((o) => { if (o.isMesh) { o.castShadow = true; o.receiveShadow = true; } });
+  g.position.set(x, 0, z);
+  return g;
+}
+
+function sidewalk(parent, x0, x1, z0, z1) {
+  const tex = canvasTex(256, 64, (g, w, h) => {
+    g.fillStyle = DARK ? '#3a352d' : '#ece4d2'; g.fillRect(0, 0, w, h);
+    g.strokeStyle = DARK ? '#2a261f' : '#d6cbb2'; g.lineWidth = 2;
+    for (let x = 0; x <= w; x += 32) { g.beginPath(); g.moveTo(x, 0); g.lineTo(x, h); g.stroke(); }
+  });
+  tex.wrapS = THREE.RepeatWrapping;
+  tex.repeat.set(Math.abs(x1 - x0) / 12, 1);
+  const m = new THREE.Mesh(new THREE.PlaneGeometry(Math.abs(x1 - x0), Math.abs(z1 - z0)), new THREE.MeshLambertMaterial({ map: tex }));
+  m.rotation.x = -Math.PI / 2;
+  m.position.set((x0 + x1) / 2, 0.03, (z0 + z1) / 2);
+  m.receiveShadow = true;
+  parent.add(m);
+  const curb = new THREE.Mesh(new THREE.BoxGeometry(Math.abs(x1 - x0), 0.14, 0.18), std(DARK ? 0x4a443a : 0xd9cfb9));
+  curb.position.set((x0 + x1) / 2, 0.07, Math.max(z0, z1));
+  curb.receiveShadow = true;
+  parent.add(curb);
+}
+
+function looksFor(p, kit) {
+  const rng = rngFor(`${p.gpin}:${kit.id}`);
+  const paint = pickOf(rng, PAINTS[kit.id]);
+  const trim = kit.id === 'studio' ? '#d9d6cf' : pickOf(rng, TRIMS);
+  const brick = pickOf(rng, BRICKS);
+  const look = {
+    rng, paint, trim, brick,
+    bulk: kit.id === 'studio' ? 'plain' : pickOf(rng, ['panel', 'panel', 'brick']),
+    awning: kit.id !== 'studio' && rng() < 0.85,
+    awnTilt: 0.32 + rng() * 0.12,
+    columns: pickOf(rng, ['round', 'round', 'pier']),
+  };
+  const glow = kit.glow;
+  look.mats = {
+    paint: std(paint, { roughness: 0.55 }),
+    trim: std(trim, { roughness: 0.6 }),
+    pier: look.bulk === 'brick' || rng() < 0.5 ? std(brick, { roughness: 0.9 }) : std(paint, { roughness: 0.55 }),
+    glass: std(kit.glass, { emissive: 0xffffff, emissiveIntensity: 0, emissiveMap: windowTexture(kit.window), roughness: 0.2 }),
+    transom: std(0x3a2f22, { emissive: 0xffffff, emissiveIntensity: 0, emissiveMap: transomTex(), roughness: 0.3 }),
+    brass: std(0xb8913f, { metalness: 0.7, roughness: 0.35 }),
+    iron: std(0x1d1b19, { metalness: 0.5, roughness: 0.5 }),
+    lantern: new THREE.MeshStandardMaterial({ color: 0xfff1c9, emissive: glow, emissiveIntensity: 0 }),
+    mosaic: new THREE.MeshLambertMaterial({ map: mosaicTex() }),
+    awning: kit.stripes ? std(0xffffff, { map: stripesTexture(kit.stripes), side: THREE.DoubleSide }) : std(paint, { side: THREE.DoubleSide }),
+    valance: new THREE.MeshStandardMaterial({ map: valanceTex(kit.stripes, paint), transparent: true, side: THREE.DoubleSide, alphaTest: 0.4 }),
+    deck: std(DARK ? 0x6b6458 : 0x8c8478),
+    white: std(0xf4efe4),
+  };
+  look.mats.glass.userData.peak = 0.85;
+  look.mats.transom.userData.peak = 0.6;
+  return look;
+}
+
+// ── The three storefronts ──
+function shopFront(ctx, p, f, kit, look) {
+  const b = f.b, G = f.G;
+  const m = 0.35;
+  const L = Math.min(f.len - 2 * m, 12.5);
+  const sStart = (f.len - L) / 2;
+  const S = add(f.a, f.dir, sStart);
+  const rng = look.rng;
+  const nb = Math.max(1, Math.round(L / 3.3));
+  const slots = nb >= 3 ? [0.5, 1, nb - 1, nb - 0.5].map((k) => (L * k) / nb) : [L / 2];
+  const at = L < 4.2 ? L / 2 : pickOf(rng, slots.filter((x) => x > 1.4 && x < L - 1.4).concat([L / 2]));
+  const entry = { at, w: 2.1, depth: 1.35, splay: 0.42 };
+  // The notch, animated from flush to full depth.
+  ctx.ground = (k) => notchPoly(b.poly, f.i, sStart + at - entry.w / 2, sStart + at + entry.w / 2, entry.depth * k, entry.splay);
+  ctx.root.add(buildRun(ctx, S, f.dir, f.n, L, { kit, look, G, entry }));
+  const { g } = frame(f.mid, f.dir, f.n);
+  ctx.root.add(g);
+  const flip = isFlipped(f.dir, f.n) ? -1 : 1;
+  bladeSign(ctx, g, flip * (sStart + at + entry.w / 2 + 0.18 - f.len / 2), G - 1.1, 0.2, kit, look);
+  return { site: { o: add(f.a, f.dir, sStart + L / 2), d: f.dir, n: f.n, W: L, front: 1.6 } };
+}
+
+function cornerShop(ctx, p, f, kit, look) {
+  const b = f.b, G = f.G, c = f.corner;
+  const k = 1.8;
+  const V = b.poly[c.v];
+  ctx.ground = (t) => chamferPoly(b.poly, c.v, k * t);
+  // The column under the corner.
+  const col = new THREE.Group();
+  col.position.copy(to3(V[0], V[1], 0));
+  const shaft = new THREE.Mesh(new THREE.CylinderGeometry(0.12, 0.15, G - 0.35, 12), look.mats.iron);
+  shaft.position.y = (G - 0.35) / 2 + 0.15;
+  shaft.castShadow = true;
+  col.add(shaft);
+  box(col, 0.42, 0.15, 0.42, 0, 0.075, 0, look.mats.iron);
+  box(col, 0.4, 0.2, 0.4, 0, G - 0.12, 0, look.mats.iron);
+  col.scale.y = 0.001;
+  ctx.root.add(col);
+  ctx.grow.push([col, 0.05]);
+  // Storefront runs down both streets, away from the corner.
+  const runs = [[c.awayA, f.n, c.lenA], [c.awayB, c.nB, c.lenB]];
+  for (const [away, n, len] of runs) {
+    const L = Math.min(len - k - 0.3, 8.5);
+    if (L < 1.8) continue;
+    ctx.root.add(buildRun(ctx, add(V, away, k + 0.05), away, n, L, { kit, look, G, entry: null }));
+  }
+  // The door on the diagonal, with sidelights and a transom, and mosaic underfoot.
+  const V1 = add(V, c.awayA, k), V2 = add(V, c.awayB, k);
+  const nD = unit(add(f.n, c.nB));
+  const mid = [(V1[0] + V2[0]) / 2, (V1[1] + V2[1]) / 2];
+  const dD = unit(sub(V2, V1));
+  const { g } = frame(add(mid, nD, -0.12), dD, nD);
+  const Wd = Math.hypot(V2[0] - V1[0], V2[1] - V1[1]);
+  box(g, 1.0, 2.26, 0.07, 0, 1.13, 0, look.mats.paint);
+  const lite = box(g, 0.68, 1.25, 0.02, 0, 1.45, 0.05, look.mats.glass, false);
+  ctx.glass.push(lite.material);
+  box(g, 0.06, 0.06, 0.08, 0.37, 1.05, 0.08, look.mats.brass, false);
+  for (const s of [-1, 1]) { const sl = box(g, (Wd - 1.1) / 2, 2.2, 0.04, s * (0.55 + (Wd - 1.1) / 4), 1.12, 0, look.mats.glass, false); ctx.glass.push(sl.material); }
+  box(g, Wd, 0.1, 0.12, 0, 2.31, 0, look.mats.trim);
+  box(g, Wd, 0.62, 0.04, 0, 2.68, 0, look.mats.transom, false);
+  const band = box(g, Wd, 0.56, 0.12, 0, G - 0.34, 0.08, new THREE.MeshStandardMaterial({ map: signBandTex(kit.sign, kit.signFont, look.paint, look.trim, Wd / 0.56) }));
+  band.scale.x = 0.001;
+  ctx.bands.push(band);
+  ctx.root.add(g);
+  ctx.grow.push([g, 0.18]);
+  g.scale.y = 0.001;
+  const floor = new THREE.Mesh(new THREE.ShapeGeometry(new THREE.Shape([V, V1, V2].map(([x, y]) => new THREE.Vector2(x, y)))), look.mats.mosaic);
+  floor.rotation.x = -Math.PI / 2;
+  floor.position.y = 0.02;
+  ctx.root.add(floor);
+  // A blade sign off the corner, turned to be read from both streets.
+  const { g: cg } = frame(V, unit(sub(V2, V1)), nD);
+  ctx.root.add(cg);
+  bladeSign(ctx, cg, 0, G - 0.9, 0.3, kit, look);
+  const LA = Math.max(2, Math.min(c.lenA - k - 0.3, 8.5));
+  return { site: { o: add(V, c.awayA, k + LA / 2), d: c.awayA, n: f.n, W: LA, front: 1.6 }, corner: { V, nD } };
+}
+
+function porchShop(ctx, p, f, kit, look) {
+  const rng = look.rng;
+  const len = f.len;
+  const Wp = Math.max(4, Math.min(len - 0.6, 10));
+  const depth = 2.4 + rng() * 0.6;
+  const deckH = 0.95 + rng() * 0.25;
+  const roofY = deckH + 2.75;
+  const { g, flipped } = frame(f.mid, f.dir, f.n);
+  const X = (v) => (flipped ? -v : v);
+  const M = look.mats;
+  // Door and steps share a line: the middle, or one side for wider porches.
+  const doorS = Wp > 6.5 ? pickOf(rng, [0, -Wp / 3.2, Wp / 3.2]) : 0;   // along the edge, from its middle
+  const xd = X(doorS);
+  // The door is set back into the house; the notch is cut where the door is.
+  ctx.ground = (t) => notchPoly(f.b.poly, f.i, len / 2 + doorS - 0.7, len / 2 + doorS + 0.7, 0.6 * t, 0);
+  ctx.groundTop = roofY + 0.2;
+
+  const base = box(g, Wp, deckH, depth, 0, deckH / 2, depth / 2, std(look.brick, { roughness: 0.9 }));
+  const deck = box(g, Wp + 0.12, 0.08, depth + 0.1, 0, deckH, depth / 2 + 0.02, M.deck);
+  ctx.grow.push([base, 0], [deck, 0.02]);
+  base.scale.y = deck.scale.y = 0.001;
+
+  // Columns along the front edge.
+  const nc = Wp > 7.5 ? 4 : 3;
+  const xs = Array.from({ length: nc }, (_, i) => -Wp / 2 + 0.3 + (i * (Wp - 0.6)) / (nc - 1));
+  const colGroup = new THREE.Group();
+  for (const x of xs) {
+    if (look.columns === 'pier') {
+      box(colGroup, 0.44, 0.95, 0.44, x, deckH + 0.475, depth - 0.25, std(look.brick, { roughness: 0.9 }));
+      const c = new THREE.Mesh(new THREE.CylinderGeometry(0.1, 0.15, roofY - deckH - 0.95, 10), M.white);
+      c.position.set(x, deckH + 0.95 + (roofY - deckH - 0.95) / 2, depth - 0.25);
+      c.castShadow = true;
+      colGroup.add(c);
+    } else {
+      const c = new THREE.Mesh(new THREE.CylinderGeometry(0.13, 0.15, roofY - deckH, 14), M.white);
+      c.position.set(x, deckH + (roofY - deckH) / 2, depth - 0.25);
+      c.castShadow = true;
+      colGroup.add(c);
+    }
+  }
+  g.add(colGroup);
+  colGroup.scale.y = 0.001;
+  colGroup.position.y = 0;
+  ctx.grow.push([colGroup, 0.15]);
+
+  // Balustrade between columns, leaving the stair open.
+  const rails = new THREE.Group();
+  const stairW = 1.7;
+  const runs = [];
+  for (let i = 0; i < xs.length - 1; i++) {
+    let a = xs[i] + 0.16, b = xs[i + 1] - 0.16;
+    if (xd + stairW / 2 > a && xd - stairW / 2 < b) {
+      if (xd - stairW / 2 - a > 0.4) runs.push([a, xd - stairW / 2]);
+      if (b - (xd + stairW / 2) > 0.4) runs.push([xd + stairW / 2, b]);
+    } else runs.push([a, b]);
+  }
+  const baluster = new THREE.BoxGeometry(0.045, 0.7, 0.045);
+  const count = runs.reduce((s, [a, b]) => s + Math.floor((b - a) / 0.14), 0) + 2 * Math.floor(depth / 0.14);
+  const inst = new THREE.InstancedMesh(baluster, M.white, Math.max(1, count));
+  let k = 0;
+  const m4 = new THREE.Matrix4();
+  for (const [a, b] of runs) {
+    box(rails, b - a, 0.07, 0.1, (a + b) / 2, deckH + 0.86, depth - 0.25, M.white);
+    box(rails, b - a, 0.05, 0.08, (a + b) / 2, deckH + 0.12, depth - 0.25, M.white);
+    for (let x = a + 0.07; x < b; x += 0.14) inst.setMatrixAt(k++, m4.makeTranslation(x, deckH + 0.48, depth - 0.25));
+  }
+  for (const s of [-1, 1]) {
+    box(rails, 0.1, 0.07, depth - 0.3, s * (Wp / 2 - 0.05), deckH + 0.86, (depth - 0.3) / 2, M.white);
+    for (let z = 0.1; z < depth - 0.3; z += 0.14) inst.setMatrixAt(k++, m4.makeTranslation(s * (Wp / 2 - 0.05), deckH + 0.48, z));
+  }
+  inst.count = k;
+  inst.castShadow = true;
+  rails.add(inst);
+  rails.visible = false;
+  g.add(rails);
+  ctx.reveal.push([rails, 0.3]);
+
+  // Roof and a plain fascia: the porch keeps its look; the sign hangs from it instead.
+  const roof = box(g, Wp + 0.5, 0.16, depth + 0.4, 0, roofY + 0.08, (depth + 0.4) / 2 - 0.1, M.trim);
+  box(roof, Wp + 0.5, 0.3, 0.08, 0, -0.18, (depth + 0.4) / 2 + 0.05, M.trim);
+  roof.visible = false;
+  ctx.reveal.push([roof, 0.32]);
+
+  // Steps from the walk up to the porch, between brick cheek walls.
+  const rise = 0.18, run = 0.3, nSteps = Math.ceil(deckH / rise);
+  const stairs = new THREE.Group();
+  for (let i = 1; i <= nSteps; i++) {
+    const h = Math.min(deckH, i * rise);
+    box(stairs, stairW, h, run, xd, h / 2, depth + (nSteps - i + 0.5) * run, std(look.brick, { roughness: 0.9 }));
+  }
+  for (const s of [-1, 1]) box(stairs, 0.3, deckH + 0.1, nSteps * run, xd + s * (stairW / 2 + 0.15), (deckH + 0.1) / 2, depth + (nSteps * run) / 2, std(look.brick, { roughness: 0.9 }));
+  stairs.scale.y = 0.001;
+  g.add(stairs);
+  ctx.grow.push([stairs, 0.05]);
+
+  // The house's windows either side of the door, where they are: lit, one lettered.
+  const front = new THREE.Group();
+  const lettering = letteringTex(kit.sign, kit.signFont);
+  const winW = 0.95, winH = 1.85;
+  const slots = [];
+  for (let x = xd - 1.5; x > -Wp / 2 + 0.7; x -= 1.7) slots.push(x);
+  for (let x = xd + 1.5; x < Wp / 2 - 0.7; x += 1.7) slots.push(x);
+  slots.sort((a, b) => Math.abs(a - xd) - Math.abs(b - xd));
+  slots.slice(0, 4).forEach((x, i) => punchedWindow(ctx, front, x, deckH + 0.55, winW, winH, look, i === 0 ? lettering : null));
+  const door = new THREE.Group();
+  door.position.set(xd, deckH, -0.56);
+  box(door, 0.98, 2.24, 0.06, 0, 1.12, 0, M.paint);
+  const lite = box(door, 0.62, 1.15, 0.02, 0, 1.45, 0.04, M.glass, false);
+  ctx.glass.push(lite.material);
+  box(door, 0.06, 0.06, 0.08, 0.36, 1.05, 0.07, M.brass, false);
+  box(door, 1.3, 0.5, 0.04, 0, 2.55, 0, M.transom, false);
+  front.add(door);
+  g.add(front);
+  front.scale.y = 0.001;
+  ctx.grow.push([front, 0.12]);
+  for (const s of [-1, 1]) {
+    const lamp = new THREE.Mesh(new THREE.BoxGeometry(0.16, 0.24, 0.16), M.lantern);
+    lamp.position.set(xd + s * 0.95, deckH + 2.1, 0.2);
+    g.add(lamp);
+    ctx.lanterns.push(lamp);
+  }
+  ctx.root.add(g);
+  bladeSign(ctx, g, xd + (xd > 0 ? -1 : 1) * (stairW / 2 + 0.3), roofY - 0.25, depth - 0.25, kit, look);
+  return { site: { o: f.mid, d: f.dir, n: f.n, W: Wp, front: depth + nSteps * run + 0.6 }, deckH, depth, xd, porch: true };
+}
+
+function flatsShop(ctx, p, f, kit, look) {
+  const rng = look.rng;
+  const len = f.len;
+  const L = Math.min(len - 0.8, 16);
+  const { g, flipped } = frame(f.mid, f.dir, f.n);
+  const X = (v) => (flipped ? -v : v);
+  const M = look.mats;
+  const rise = 0.18, nSteps = 3, floorY = rise * nSteps;
+  const entryS = L < 7 ? 0 : pickOf(rng, [0, -L / 4, L / 4]);   // along the edge, from its middle
+  const xe = X(entryS), D = 1.1, We = 1.9;
+  ctx.ground = (t) => notchPoly(f.b.poly, f.i, len / 2 + entryS - We / 2, len / 2 + entryS + We / 2, D * t, 0);
+
+  // Steps up into the recess, the door at the back, a stone lintel across the opening.
+  const entry = new THREE.Group();
+  for (let i = 1; i <= nSteps; i++) box(entry, We - 0.1, i * rise, 0.32, xe, (i * rise) / 2, 0.16 + (nSteps - i) * 0.32, M.deck);
+  box(entry, We - 0.1, floorY, D, xe, floorY / 2, -D / 2, M.deck);
+  const door = new THREE.Group();
+  door.position.set(xe, floorY, -D + 0.04);
+  box(door, 1.0, 2.24, 0.06, 0, 1.12, 0, M.paint);
+  ctx.glass.push(box(door, 0.66, 1.2, 0.02, 0, 1.45, 0.04, M.glass, false).material);
+  box(door, 0.06, 0.06, 0.08, 0.37, 1.05, 0.07, M.brass, false);
+  box(door, We - 0.1, 0.45, 0.04, 0, 2.5, 0, M.transom, false);
+  entry.add(door);
+  box(entry, We + 0.3, 0.3, 0.3, xe, floorY + 2.95, 0.1, M.trim);
+  box(entry, We, 0.05, D, xe, floorY + 2.78, -D / 2, M.trim, false);
+  g.add(entry);
+  entry.scale.y = 0.001;
+  ctx.grow.push([entry, 0.04]);
+  for (const sd of [-1, 1]) {
+    const lamp = new THREE.Mesh(new THREE.BoxGeometry(0.16, 0.26, 0.16), M.lantern);
+    lamp.position.set(xe + sd * (We / 2 + 0.3), floorY + 2.0, 0.2);
+    g.add(lamp);
+    ctx.lanterns.push(lamp);
+  }
+
+  // A canvas canopy over the steps, the name on its valance (signs on awning panels).
+  const can = new THREE.Group();
+  can.position.set(xe, floorY + 3.15, 0.1);
+  const canW = We + 0.7, canD = 1.7;
+  const top = new THREE.Mesh(new THREE.BoxGeometry(canW, 0.04, canD), M.awning);
+  top.position.set(0, -0.18, canD / 2);
+  top.rotation.x = 0.22;
+  const vTex = signBandTex(kit.sign, kit.signFont, look.paint, look.trim, canW / 0.3);
+  const val = new THREE.Mesh(new THREE.BoxGeometry(canW, 0.3, 0.03), new THREE.MeshStandardMaterial({ map: vTex }));
+  val.position.set(0, -0.52, canD - 0.05);
+  for (const sd of [-1, 1]) {
+    const side = new THREE.Mesh(new THREE.BoxGeometry(0.03, 0.3, canD), M.awning);
+    side.position.set(sd * canW / 2, -0.37, canD / 2);
+    can.add(side);
+  }
+  can.add(top, val);
+  can.traverse((o) => { if (o.isMesh) o.castShadow = true; });
+  can.scale.set(1, 1, 0.001);
+  g.add(can);
+  ctx.grow.push([can, 0.25]);
+  ctx.canopy = can;
+
+  // The ground-floor windows in a steady rhythm either side of the entry: lit, two lettered,
+  // and on some buildings canvas window awnings.
+  const lettering = letteringTex(kit.sign, kit.signFont);
+  const sill = floorY + 0.75, winW = 1.0, winH = 1.75;
+  const xs = [];
+  for (let x = entryS - We / 2 - 1.3; x > -L / 2 + 0.6; x -= 2.3) xs.push(x);
+  for (let x = entryS + We / 2 + 1.3; x < L / 2 - 0.6; x += 2.3) xs.push(x);
+  xs.sort((a, b) => Math.abs(a - entryS) - Math.abs(b - entryS));
+  const winAwnings = rng() < 0.5 && kit.stripes;
+  const wins = new THREE.Group();
+  xs.forEach((sAlong, i) => {
+    const x = X(sAlong);
+    punchedWindow(ctx, wins, x, sill, winW, winH, look, i < 2 ? lettering : null);
+    if (winAwnings) {
+      const pivot = new THREE.Group();
+      pivot.position.set(x, sill + winH + 0.3, 0.1);
+      const deck = new THREE.Mesh(new THREE.BoxGeometry(winW + 0.3, 0.03, 0.8), M.awning);
+      deck.position.z = 0.4;
+      const v = new THREE.Mesh(new THREE.PlaneGeometry(winW + 0.3, 0.2), M.valance);
+      v.position.set(0, -0.1, 0.8);
+      pivot.add(deck, v);
+      pivot.rotation.x = -Math.PI / 2;
+      pivot.visible = false;
+      g.add(pivot);
+      ctx.awnings.push([pivot, 0.55]);
+    }
+  });
+  g.add(wins);
+  wins.scale.y = 0.001;
+  ctx.grow.push([wins, 0.1]);
+  ctx.root.add(g);
+  return { site: { o: f.mid, d: f.dir, n: f.n, W: Math.min(L, 12), front: 2.0 }, entryX: xe, floorY };
+}
+
+// Build a storefront for the picked lot. Returns { root, tweens, view } and swaps the building's
+// mesh for a split one (a notched ground floor under the original upper floors).
+function buildStorefront(kit, p) {
+  const f = p.front;
+  const look = looksFor(p, kit);
+  const ctx = { root: new THREE.Group(), grow: [], reveal: [], glass: [], bands: [], awnings: [], blades: [], lanterns: [], ground: null, groundTop: null };
+  const variant = variantFor(p, f);
+  const h = f.b.h;
+  f.G = h < 5 ? Math.max(3.4, h) : Math.max(3.5, Math.min(4.1, h * 0.36));
+  const res = variant === 'porch' ? porchShop(ctx, p, f, kit, look) : variant === 'corner' ? cornerShop(ctx, p, f, kit, look)
+    : variant === 'flats' ? flatsShop(ctx, p, f, kit, look) : shopFront(ctx, p, f, kit, look);
+
+  // The split building: ground floor (rebuilt as the notch or corner opens) and the floors above.
+  const gTop = Math.min(h, ctx.groundTop || f.G);
+  const upper = h - gTop > 0.3 ? extrudeMesh(f.b.poly, gTop, h, MAT.picked) : null;
+  if (upper) ctx.root.add(upper);
+  let ground = extrudeMesh(ctx.ground(0), 0, gTop, MAT.picked);
+  ctx.root.add(ground);
+  const setGround = (t) => {
+    const next = new THREE.ExtrudeGeometry(shapeOf(ctx.ground(t)), { depth: gTop, bevelEnabled: false });
+    next.rotateX(-Math.PI / 2);
+    ground.geometry.dispose();
+    ground.geometry = next;
+  };
+
+  // The street in front of the site: sidewalk, curb, two trees.
+  const site = res.site;
+  const sf = frame(site.o, site.d, site.n);
+  const pg = sf.g;
+  ctx.root.add(pg);
+  const W = site.W;
+  const curb = Math.max(site.front + 1.2, Math.min(f.street - 4.2, site.front + 6));
+  sidewalk(pg, -W / 2 - 6, W / 2 + 6, curb - 2.4, curb);
+  // Trees at the curb; at a corner, only down the street, out of the view from the corner.
+  const farSide = isFlipped(site.d, site.n) ? -1 : 1;
+  for (const s2 of variant === 'corner' ? [farSide] : [-1, 1]) pg.add(tree(s2 * (W / 2 + 2.6), curb - 0.7));
+
+  // On the sidewalk, or on the porch. (The porch site shares the porch's frame, so its local x
+  // positions, like the door's xd, carry over.)
+  const props = [];
+  const onPorch = !!res.porch;
+  const baseY = onPorch ? res.deckH : 0;
+  const placeOn = (obj, x, y, z, rotY = 0) => { obj.position.set(x, y, z); obj.rotation.y = rotY; obj.scale.setScalar(0.001); pg.add(obj); props.push(obj); };
+  const span = (onPorch ? W - 1.2 : W) - 1.6;
+  const nT = onPorch ? Math.min(kit.tables, 2) : kit.tables;
+  const tables = [];
+  for (let i = 0; i < nT; i++) {
+    let x = -span / 2 + (span * (i + 0.5)) / Math.max(nT, 1);
+    if (onPorch && Math.abs(x - res.xd) < 1.3) x += x < res.xd ? -0.9 : 0.9;
+    const z = onPorch ? 1.15 + (i % 2) * 0.5 : site.front + 0.9 + (i % 2) * 0.6;
+    placeOn(table(kit.id === 'bistro' ? 0xf4ead6 : 0xf2ece0), x, baseY, z, Math.PI / 2);
+    tables.push([x, z]);
+  }
+  const walkZ = site.front + (onPorch ? 0.4 : 0.7);
+  if (kit.props === 'cafe') { placeOn(aFrame('espresso'), W / 2 - 0.4, 0, walkZ + 0.6, -0.4); placeOn(planter(), -W / 2 + 0.2, 0, walkZ); }
+  if (kit.props === 'books') { placeOn(bookCart(), onPorch ? 0 : -W / 4, 0, walkZ + 0.4, 0); placeOn(bench(), W / 4 + 0.6, 0, walkZ + 0.9, Math.PI); placeOn(aFrame('used & new'), W / 2 - 0.3, 0, walkZ + 0.7, -0.4); }
+  if (kit.props === 'bistro') { placeOn(planter(), -W / 2 + 0.2, 0, walkZ); placeOn(planter(), W / 2 - 0.2, 0, walkZ); placeOn(aFrame('tonight'), W / 2 - 0.6, 0, walkZ + 0.8, -0.4); }
+  if (kit.props === 'studio') { placeOn(bike(), -W / 3, 0, walkZ + 0.7, 0.1); placeOn(bike(), -W / 3 + 0.8, 0, walkZ + 0.8, 0.1); placeOn(planter(), W / 2 - 0.2, 0, walkZ); }
+  if (kit.props === 'bistro' && !onPorch && variant !== 'corner') {
+    const lights = stringLights(W, kit.glow);
+    lights.position.z = site.front - 1.4;
+    lights.visible = false;
+    pg.add(lights);
+    ctx.reveal.push([lights, 0.62]);
+    ctx.bulbs = lights.userData.bulbs;
+  }
+
+  // Light spilling out of the shop.
+  const lamp = new THREE.PointLight(kit.glow, 0, 16, 1.6);
+  lamp.position.set(onPorch ? res.xd : 0, baseY + 2.3, onPorch ? 1.0 : 1.7);
+  pg.add(lamp);
+
+  // People.
+  const rng = rngFor(`${p.gpin}:people:${kit.id}`);
+  const folk = [];
+  for (let i = 0; i < kit.people; i++) {
+    const seated = i < tables.length;
+    const who = person(rng);
+    const side = i % 2 ? 1 : -1;
+    const from = new THREE.Vector3(side * (W / 2 + 9 + i * 1.6), 0, curb - 1.2 + (i % 3) * 0.3);
+    let to, face;
+    if (seated) { to = new THREE.Vector3(tables[i][0] - 0.62, baseY, tables[i][1]); face = Math.PI / 2; }
+    else if (onPorch && i % 2 === 0) { to = new THREE.Vector3(res.xd + (rng() - 0.5) * 0.6, 0, site.front - 0.2 + rng() * 0.6); face = Math.PI; }
+    else { to = new THREE.Vector3((rng() - 0.5) * (W - 1), 0, walkZ + 0.2 + rng() * 1.4); face = Math.PI + (rng() - 0.5) * 1.2; }
+    who.group.position.copy(from);
+    who.group.visible = false;
+    pg.add(who.group);
+    folk.push({ who, from, to, face, seated, t0: 0.5 + i * 0.05 });
+  }
+
+  // ── The timeline ──
   const tweens = [];
   const at = (t0, t1, fn) => tweens.push({ t0, t1, fn });
-
-  // Glass and its frame.
-  const glassMat = std(kit.glass, { emissive: 0xffffff, emissiveIntensity: 0, emissiveMap: windowTexture(kit.window), roughness: 0.25 });
-  const glass = new THREE.Mesh(new THREE.BoxGeometry(W, 2.8, 0.1), glassMat);
-  glass.position.set(0, 1.5, 0.12);
-  glass.scale.y = 0.001;
-  group.add(glass);
-  const frameMat = std(0x1d1a17);
-  const frame = new THREE.Group();
-  for (const x of [-W / 2, -W / 6, W / 6, W / 2]) {
-    const bar = new THREE.Mesh(new THREE.BoxGeometry(0.12, 2.9, 0.16), frameMat);
-    bar.position.set(x, 1.5, 0.14);
-    frame.add(bar);
-  }
-  const head = new THREE.Mesh(new THREE.BoxGeometry(W + 0.12, 0.14, 0.18), frameMat);
-  head.position.set(0, 2.95, 0.14);
-  frame.add(head);
-  frame.visible = false;
-  group.add(frame);
-  at(0, 0.28, (k) => { glass.scale.y = Math.max(0.001, ease(k)); glass.position.y = 0.1 + 1.4 * ease(k); frame.visible = k > 0.05; });
-  at(0.15, 0.5, (k) => { glassMat.emissiveIntensity = 0.82 * ease(k); });
-
-  // Awning (or a flat canopy for the studio).
-  const pivot = new THREE.Group();
-  pivot.position.set(0, 3.12, 0.16);
-  const awnMat = kit.stripes ? std(0xffffff, { map: stripesTexture(kit.stripes), side: THREE.DoubleSide })
-    : std(0x2a2d31, { metalness: 0.4, roughness: 0.5 });
-  const awning = new THREE.Mesh(new THREE.BoxGeometry(W * 0.96, 0.05, kit.stripes ? 1.8 : 1.1), awnMat);
-  awning.position.z = kit.stripes ? 0.9 : 0.55;
-  awning.castShadow = true;
-  pivot.add(awning);
-  pivot.rotation.x = -Math.PI / 2;
-  pivot.visible = false;
-  group.add(pivot);
-  const awnEnd = kit.stripes ? 0.34 : 0.04;
-  at(0.22, 0.52, (k) => { pivot.visible = k > 0; pivot.rotation.x = -Math.PI / 2 + (Math.PI / 2 + awnEnd) * ease(k); });
-
-  // Sign.
-  const signW = Math.min(W * 0.62, 4.2);
-  const sign = new THREE.Mesh(new THREE.PlaneGeometry(signW, signW / 4), new THREE.MeshStandardMaterial({
-    map: textTexture(kit.sign, kit.signFont, kit.signInk, kit.signBg), emissive: 0xffffff, emissiveIntensity: 0.15,
-    emissiveMap: null, roughness: 0.6,
-  }));
-  sign.position.set(0, 3.25 + signW / 8 + (kit.stripes ? 0.35 : 0.2), 0.2);
-  sign.scale.setScalar(0.001);
-  group.add(sign);
-  at(0.42, 0.6, (k) => { const s = Math.max(0.001, k < 0.7 ? ease(k / 0.7) * 1.08 : 1.08 - 0.08 * ((k - 0.7) / 0.3)); sign.scale.setScalar(s); });
-
-  // Warm light spilling out.
-  const lamp = new THREE.PointLight(kit.glow, 0, 16, 1.6);
-  lamp.position.set(0, 2.3, 1.6);
-  group.add(lamp);
-  at(0.2, 0.6, (k) => { lamp.intensity = (DARK ? 45 : 22) * ease(k); });
-
-  // On the sidewalk.
-  const props = [];
-  const place = (obj, x, z, rotY = 0) => { obj.position.set(x, 0, z); obj.rotation.y = rotY; obj.scale.setScalar(0.001); group.add(obj); props.push(obj); };
-  const span = W - 1.2;
-  if (kit.tables) for (let i = 0; i < kit.tables; i++) place(table(kit.id === 'bistro' ? 0xf4ead6 : 0xf2ece0), -span / 2 + (span * (i + 0.5)) / kit.tables, 2.6 + (i % 2) * 0.6, Math.PI / 2);
-  if (kit.props === 'cafe') { place(aFrame('espresso'), W / 2 + 0.6, 1.4, -0.4); place(planter(), -W / 2 - 0.5, 0.8); place(planter(), W / 2 + 0.5, 0.8); }
-  if (kit.props === 'books') { place(bookCart(), -W / 4, 1.9, 0); place(bench(), W / 4, 2.2, Math.PI); place(planter(), -W / 2 - 0.5, 0.8); place(aFrame('used & new'), W / 2 + 0.6, 1.4, -0.4); }
-  if (kit.props === 'bistro') { place(planter(), -W / 2 - 0.5, 0.8); place(planter(), W / 2 + 0.5, 0.8); place(aFrame('tonight'), W / 2 + 0.7, 1.6, -0.4); }
-  if (kit.props === 'studio') { place(bike(), -W / 3, 2.2, 0.1); place(bike(), -W / 3 + 0.8, 2.3, 0.1); place(bench(), W / 4, 2.0, Math.PI); place(planter(), W / 2 + 0.5, 0.8); }
-  props.forEach((obj, i) => at(0.48 + i * 0.035, 0.66 + i * 0.035, (k) => obj.scale.setScalar(Math.max(0.001, ease(k)))));
-
-  if (kit.props === 'bistro') {
-    const lights = stringLights(W, kit.glow);
-    lights.visible = false;
-    group.add(lights);
-    at(0.55, 0.8, (k) => { lights.visible = k > 0; lights.userData.bulbs.emissiveIntensity = 2.2 * ease(k); });
-  }
-
-  // People arriving from along the street.
-  const colors = [0x8a2b1f, 0x2f4a3a, 0x3d4f7a, 0xd9b46a, 0x5b3a5e, 0x6b5a46];
-  for (let i = 0; i < kit.people; i++) {
-    const seated = kit.tables && i < kit.tables;
-    const p = person(colors[i % colors.length], seated);
-    const side = i % 2 ? 1 : -1;
-    const from = new THREE.Vector3(side * (W / 2 + 9 + i * 1.5), 0, 4.9 + (i % 3) * 0.3);
-    // Seated people take the chair on the table's west side (tables are turned a quarter, so
-    // their chairs sit 0.62 m either side along the facade) and face it; others mill about.
-    let to, face;
-    if (seated) {
-      to = new THREE.Vector3(-span / 2 + (span * (i + 0.5)) / kit.tables - 0.62, 0, 2.6 + (i % 2) * 0.6);
-      face = Math.PI / 2;
-    } else {
-      to = new THREE.Vector3((Math.random() - 0.5) * (W - 1), 0, 1.3 + Math.random() * 2.4);
-      face = Math.PI + (Math.random() - 0.5) * 0.8;
-    }
-    p.position.copy(from);
-    p.visible = false;
-    group.add(p);
-    const t0 = 0.5 + i * 0.05, t1 = Math.min(1, t0 + 0.38);
-    at(t0, t1, (k) => {
-      p.visible = k > 0;
-      p.position.lerpVectors(from, to, ease(k));
-      p.position.y = k < 1 ? Math.abs(Math.sin(k * 18)) * 0.06 : 0;
-      const d = new THREE.Vector3().subVectors(to, from);
-      p.rotation.y = k < 1 ? Math.atan2(d.x, d.z) : face;
+  at(0.0, 0.24, (k) => setGround(ease(k)));
+  ctx.grow.forEach(([m, delay]) => at(0.06 + delay, 0.3 + delay, (k) => { if (m === ctx.canopy) m.scale.z = Math.max(0.001, ease(k)); else m.scale.y = Math.max(0.001, ease(k)); }));
+  ctx.reveal.forEach(([m, t]) => at(t, t + 0.02, (k) => { m.visible = k > 0; }));
+  at(0.22, 0.5, (k) => { for (const m of ctx.glass) m.emissiveIntensity = (m.userData.peak || 0.85) * ease(k); look.mats.transom.emissiveIntensity = 0.6 * ease(k); });
+  ctx.bands.forEach((b, i) => at(0.32 + i * 0.04, 0.5 + i * 0.04, (k) => { b.scale.x = Math.max(0.001, ease(k)); }));
+  ctx.awnings.forEach(([pv, tilt], i) => at(0.4 + i * 0.05, 0.58 + i * 0.05, (k) => { pv.visible = k > 0; pv.rotation.x = -Math.PI / 2 + (Math.PI / 2 + tilt) * ease(k); }));
+  ctx.blades.forEach((bl) => { const end = bl.rotation.y; bl.userData.end = end; bl.visible = false; at(0.5, 0.66, (k) => { bl.visible = k > 0; bl.rotation.y = end + (1 - ease(k)) * 1.4; }); });
+  at(0.45, 0.7, (k) => { look.mats.lantern.emissiveIntensity = 2.2 * ease(k); lamp.intensity = (DARK ? 42 : 20) * ease(k); if (ctx.bulbs) ctx.bulbs.emissiveIntensity = 2.2 * ease(k); });
+  props.forEach((obj, i) => at(0.55 + i * 0.03, 0.72 + i * 0.03, (k) => obj.scale.setScalar(Math.max(0.001, ease(k)))));
+  for (const f2 of folk) {
+    const t1 = Math.min(1, f2.t0 + 0.4);
+    at(f2.t0, t1, (k) => {
+      const { who, from, to } = f2;
+      who.group.visible = k > 0;
+      who.group.position.lerpVectors(from, to, ease(k));
+      if (k < 1) {
+        const d = new THREE.Vector3().subVectors(to, from);
+        who.group.rotation.y = Math.atan2(d.x, d.z);
+        who.walk(k * 22);
+        if (f2.seated) who.group.position.y = 0;
+      } else {
+        who.group.rotation.y = f2.face;
+        if (f2.seated) { who.sit(); who.group.position.y = to.y; } else who.stand();
+      }
     });
   }
-  return { group, tweens };
+  return { root: ctx.root, tweens, variant, view: { ...res, site } };
+}
+
+// A person, about 1.6–1.85 m: legs that swing, arms, a head.
+function person(rng) {
+  const H = 1.6 + rng() * 0.25;
+  const tops = [0x8a2b1f, 0x2f4a3a, 0x3d4f7a, 0xd9b46a, 0x5b3a5e, 0xe9dfc7, 0x6b5a46, 0x7a8f9a, 0xb5653a];
+  const bottoms = [0x2b2b2b, 0x3d4f7a, 0x5a4a3a, 0x1f2a44, 0x7a6a55, 0x8c8478];
+  const skins = [0xe2b996, 0xc68a62, 0x8d5a3b, 0xf1d0b0, 0xa86f4c, 0x6b4430];
+  const top = std(pickOf(rng, tops)), bottom = std(pickOf(rng, bottoms)), skin = std(pickOf(rng, skins));
+  const hair = std(pickOf(rng, [0x2a1d14, 0x4a3324, 0x8a6a3a, 0x1a1714, 0xc9b8a0]));
+  const legL = H * 0.47, torso = H * 0.31, headR = H * 0.062;
+  const g = new THREE.Group();
+  const hips = new THREE.Group();
+  hips.position.y = legL;
+  g.add(hips);
+  const legs = [-1, 1].map((s) => {
+    const hip = new THREE.Group();
+    hip.position.x = s * 0.09;
+    const thigh = new THREE.Mesh(new THREE.BoxGeometry(0.13, legL / 2, 0.15), bottom);
+    thigh.position.y = -legL / 4;
+    const knee = new THREE.Group();
+    knee.position.y = -legL / 2;
+    const shin = new THREE.Mesh(new THREE.BoxGeometry(0.11, legL / 2, 0.13), bottom);
+    shin.position.y = -legL / 4;
+    const shoe = new THREE.Mesh(new THREE.BoxGeometry(0.12, 0.07, 0.24), std(0x2a2622));
+    shoe.position.set(0, -legL / 2 + 0.035, 0.04);
+    knee.add(shin, shoe);
+    hip.add(thigh, knee);
+    hips.add(hip);
+    return { hip, knee };
+  });
+  const body = new THREE.Mesh(new THREE.BoxGeometry(0.38, torso, 0.22), top);
+  body.position.y = torso / 2;
+  hips.add(body);
+  const arms = [-1, 1].map((s) => {
+    const sh = new THREE.Group();
+    sh.position.set(s * 0.24, torso - 0.05, 0);
+    const arm = new THREE.Mesh(new THREE.CylinderGeometry(0.05, 0.045, H * 0.32, 6), top);
+    arm.position.y = -H * 0.16;
+    const hand = new THREE.Mesh(new THREE.SphereGeometry(0.05, 6, 5), skin);
+    hand.position.y = -H * 0.33;
+    sh.add(arm, hand);
+    hips.add(sh);
+    return sh;
+  });
+  const head = new THREE.Mesh(new THREE.SphereGeometry(headR, 12, 10), skin);
+  head.position.y = torso + headR + 0.04;
+  const cap = new THREE.Mesh(new THREE.SphereGeometry(headR * 1.04, 12, 8, 0, Math.PI * 2, 0, Math.PI / 2), hair);
+  cap.position.copy(head.position);
+  cap.rotation.x = -0.25;
+  hips.add(head, cap);
+  g.traverse((o) => { if (o.isMesh) o.castShadow = true; });
+  // A negative hip angle swings a leg forward; a positive knee angle bends the shin back.
+  const who = {
+    group: g,
+    walk(phase) {
+      const s = Math.sin(phase);
+      legs.forEach(({ hip, knee }, i) => { const a = i ? -s : s; hip.rotation.x = -a * 0.45; knee.rotation.x = Math.max(0, -a) * 0.7; });
+      arms.forEach((arm, i) => { arm.rotation.x = (i ? s : -s) * 0.4; });
+      hips.position.y = legL + Math.abs(Math.cos(phase)) * 0.03;
+    },
+    stand() {
+      legs.forEach(({ hip, knee }) => { hip.rotation.x = 0; knee.rotation.x = 0; });
+      arms.forEach((arm) => { arm.rotation.x = 0.05; });
+      hips.position.y = legL;
+    },
+    sit() {
+      legs.forEach(({ hip, knee }) => { hip.rotation.x = -Math.PI / 2; knee.rotation.x = Math.PI / 2; });
+      arms.forEach((a) => { a.rotation.x = -0.7; });
+      hips.position.y = 0.48;
+    },
+  };
+  who.stand();
+  return who;
+}
+
+
+function clearKit() {
+  if (activeKit && three) {
+    three.scene.remove(activeKit.root);
+    activeKit.root.traverse((o) => { if (o.geometry) o.geometry.dispose(); });
+    if (activeKit.hidden) activeKit.hidden.visible = true;
+  }
+  activeKit = null;
 }
 
 function applyKit(id, { silent = false } = {}) {
-  if (activeKit && three) three.scene.remove(activeKit.group);
-  activeKit = null;
+  clearKit();
   const kit = KITS.find((k) => k.id === id) || null;
   if (!silent) { setPressed(kit ? kit.id : null); fillRule(kit); }
   if (!kit || !picked) { if (!silent) writeHash(); return; }
   if (three && picked.front) {
-    const built = buildKit(kit, picked.front);
-    three.scene.add(built.group);
-    activeKit = { id: kit.id, ...built, start: performance.now(), dur: 3400 };
+    const built = buildStorefront(kit, picked);
+    const hidden = picked.front.b.mesh || null;
+    if (hidden) hidden.visible = false;
+    three.scene.add(built.root);
+    activeKit = { id: kit.id, root: built.root, tweens: built.tweens, hidden, variant: built.variant, start: performance.now(), dur: 4200 };
     if (REDUCE) for (const t of built.tweens) t.fn(1);
-    if (!flight) flyTo(picked);
+    flyTo(picked, built.view);
   } else {
-    activeKit = { id: kit.id, group: new THREE.Group(), tweens: [], start: 0, dur: 0 };
+    activeKit = { id: kit.id, root: new THREE.Group(), tweens: [], start: 0, dur: 0 };
   }
   writeHash();
 }
