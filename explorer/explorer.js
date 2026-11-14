@@ -191,7 +191,7 @@ function fillLot(p) {
   card.textContent = p.photo ? 'property card ↗' : 'see the property card ↗';
   const sv = $('lot-sv');
   if (p.sv) { sv.href = streetViewUrl(p.sv); sv.parentElement.hidden = false; } else sv.parentElement.hidden = true;
-  const hasBuilding = p.buildings.length > 0;
+  const hasBuilding = p.buildings.length > 0 || p.gpin === HERO_801;
   $('no-building').hidden = hasBuilding;
   $('kits').hidden = !hasBuilding;
   $('rule').hidden = true;
@@ -225,8 +225,8 @@ function select(gpin, kitId = null, { fly = true } = {}) {
   fillLot(p);
   if (three) {
     highlight(p);
-    p.front = frontage(p);
-    if (fly) flyTo(p);
+    p.front = p.hero ? null : frontage(p);
+    if (fly) { if (p.hero) glide(heroView('picked')); else flyTo(p); }
   }
   if (kitId) applyKit(kitId);
   else writeHash();
@@ -386,6 +386,12 @@ function buildBuildings() {
     const g = new THREE.ExtrudeGeometry(shapeOf(b.poly), { depth: b.h, bevelEnabled: false });
     g.rotateX(-Math.PI / 2);
     const p = b.parcel && parcels.get(b.parcel);
+    if (p && p.gpin === HERO_801 && !p.hero) {
+      p.hero = buildHero801(p);
+      three.scene.add(p.hero.group);
+      three.pickables.push(...p.hero.pick);
+      continue;
+    }
     if (p) {
       const m = new THREE.Mesh(g, MAT.building);
       m.castShadow = m.receiveShadow = true;
@@ -445,7 +451,8 @@ function buildLabels() {
 }
 
 function highlight(p) {
-  p.plate.material.color.setHex(PALETTE.picked);
+  // The hero's lot reads as lawn up close; elsewhere the picked lot turns gold.
+  p.plate.material.color.setHex(p.hero ? (DARK ? 0x3e4f36 : 0xa9b98f) : PALETTE.picked);
   for (const m of p.meshes) m.material = MAT.picked;
 }
 
@@ -576,6 +583,9 @@ function flyTo(p, view = null) {
   }
   fly({ pos, target });
 }
+
+// (select() has an option named fly, so it moves the camera through this alias.)
+const glide = (to, instant) => fly(to, instant);
 
 function fly(to, instant = false) {
   const { camera, controls } = three;
@@ -1729,6 +1739,7 @@ function clearKit() {
     three.scene.remove(activeKit.root);
     activeKit.root.traverse((o) => { if (o.geometry) o.geometry.dispose(); });
     if (activeKit.hidden) activeKit.hidden.visible = true;
+    if (activeKit.cleanup) activeKit.cleanup();
   }
   activeKit = null;
 }
@@ -1738,7 +1749,13 @@ function applyKit(id, { silent = false } = {}) {
   const kit = KITS.find((k) => k.id === id) || null;
   if (!silent) { setPressed(kit ? kit.id : null); fillRule(kit); }
   if (!kit || !picked) { if (!silent) writeHash(); return; }
-  if (three && picked.front) {
+  if (three && picked.hero) {
+    const built = heroTransform801(kit, picked);
+    three.scene.add(built.root);
+    activeKit = { id: kit.id, root: built.root, tweens: built.tweens, hidden: null, cleanup: built.cleanup, variant: 'hero', start: performance.now(), dur: 4200 };
+    if (REDUCE) for (const t of built.tweens) t.fn(1);
+    fly(heroView('street'));
+  } else if (three && picked.front) {
     const built = buildStorefront(kit, picked);
     const hidden = picked.front.b.mesh || null;
     if (hidden) hidden.visible = false;
@@ -1750,6 +1767,422 @@ function applyKit(id, { silent = false } = {}) {
     activeKit = { id: kit.id, root: new THREE.Group(), tweens: [], start: 0, dur: 0 };
   }
   writeHash();
+}
+
+
+// ── Hero: 801 Stockley Gardens ──
+// The district's showpiece, modelled by hand rather than extruded: a 1914 Mediterranean-revival
+// house (assessor: 2½-story brick, 2,730 sq ft, with a 1,245 sq ft wraparound open porch and a
+// 12 × 8 ft upper balcony over the entrance; assessor's photo 4/19/23). The city's footprint is the
+// roof outline, porch included. In its own axes (u toward Stockley Gardens, v away from Raleigh
+// Avenue) the pieces sit like this, in metres:
+//   main block   u −9.0…6.9,   v −6.95…13.2   (2½ stories, red tile hip roof, bracketed eaves)
+//   rear wing    u −15.8…−9.0, v −5.4…3.6     (two stories, low hip)
+//   porch        front u 6.9…9.7 (v −8.5…13.2), entrance bump to u 10.5 (v −0.2…7.3),
+//                Raleigh side v −10.3…−6.95 (u −8.8…6.9); floor 0.95 m up, roof at 3.95 m
+// Bays with crenellated parapets on the front and the Raleigh side, a hipped dormer facing
+// Stockley, four tall chimneys, the hedge along both walks.
+const HERO_801 = '1428701712';
+const H801 = {
+  c: [26.57, -104.45], U: [0.879, -0.477], V: [0.477, 0.879],
+  main: [-9.0, 6.9, -6.95, 13.2], wing: [-15.8, -9.0, -5.4, 3.6],
+  porchY: 0.95, porchTop: 3.95, eave: 7.8, wingEave: 6.6,
+};
+
+function heroMats() {
+  const tile = canvasTex(256, 256, (g, w, h) => {
+    g.fillStyle = DARK ? '#7a3528' : '#b5533a'; g.fillRect(0, 0, w, h);
+    for (let y = 0; y < h; y += 16) {
+      g.fillStyle = DARK ? '#5c271e' : '#8f3d2a'; g.fillRect(0, y + 12, w, 4);
+      for (let x = (y / 16) % 2 ? 0 : 16; x < w; x += 32) { g.fillStyle = 'rgba(0,0,0,0.12)'; g.fillRect(x, y, 3, 12); }
+    }
+  });
+  tile.wrapS = tile.wrapT = THREE.RepeatWrapping;
+  const brick = canvasTex(256, 256, (g, w, h) => {
+    g.fillStyle = DARK ? '#9a8a70' : '#dcc7a4'; g.fillRect(0, 0, w, h);
+    g.fillStyle = DARK ? '#857760' : '#cdb48e';
+    for (let y = 0; y < h; y += 8) for (let x = (y / 8) % 2 ? 0 : 12; x < w; x += 24) g.fillRect(x, y, 22, 6);
+  });
+  brick.wrapS = brick.wrapT = THREE.RepeatWrapping;
+  return {
+    wall: new THREE.MeshLambertMaterial({ color: 0xffffff, map: brick }),
+    roof: new THREE.MeshLambertMaterial({ color: 0xffffff, map: tile, side: THREE.DoubleSide }),
+    trim: new THREE.MeshLambertMaterial({ color: DARK ? 0xcfc6b2 : 0xf3ecdc }),
+    white: new THREE.MeshLambertMaterial({ color: DARK ? 0xd8d0c0 : 0xfaf6ee }),
+    deck: new THREE.MeshLambertMaterial({ color: DARK ? 0x5d574d : 0x9a9488 }),
+    base: new THREE.MeshLambertMaterial({ color: DARK ? 0x7d6a55 : 0xc4a986 }),
+    glass: new THREE.MeshStandardMaterial({ color: 0x2b3440, roughness: 0.3 }),
+    shopGlass: new THREE.MeshStandardMaterial({ color: 0x2b3440, roughness: 0.3, emissive: 0xffffff, emissiveIntensity: 0 }),
+    chimney: new THREE.MeshLambertMaterial({ color: DARK ? 0x8e7d64 : 0xd2b993 }),
+    cap: new THREE.MeshLambertMaterial({ color: DARK ? 0x4a4038 : 0x6e6052 }),
+    hedge: new THREE.MeshLambertMaterial({ color: DARK ? 0x2f4a32 : 0x4f7a3f, flatShading: true }),
+    path: new THREE.MeshLambertMaterial({ color: DARK ? 0x4a453c : 0xe7dfcd }),
+  };
+}
+
+// World placement: a group at the footprint's centre turned so local x = u, local z = −v.
+function heroGroup(h) {
+  const g = new THREE.Group();
+  g.position.copy(to3(h.c[0], h.c[1], 0));
+  g.rotation.y = Math.atan2(h.U[1], h.U[0]);
+  return g;
+}
+const huv = (h, u, v) => [h.c[0] + u * h.U[0] + v * h.V[0], h.c[1] + u * h.U[1] + v * h.V[1]];
+
+// A box spanning [u0,u1] × [v0,v1] from y0 to y1, in the hero's frame.
+function hbox(parent, u0, u1, v0, v1, y0, y1, mat, uvScale = 0) {
+  const geo = new THREE.BoxGeometry(u1 - u0, y1 - y0, v1 - v0);
+  if (uvScale) {   // world-scaled UVs so brick and tile textures keep their size
+    const pos = geo.attributes.position, nor = geo.attributes.normal, uv = geo.attributes.uv;
+    for (let i = 0; i < pos.count; i++) {
+      const x = pos.getX(i) + (u0 + u1) / 2, y = pos.getY(i) + (y0 + y1) / 2, z = pos.getZ(i) - (v0 + v1) / 2;
+      const ax = Math.abs(nor.getX(i)), az = Math.abs(nor.getZ(i));
+      uv.setXY(i, (ax > 0.5 ? z : x) / uvScale, (ax > 0.5 || az > 0.5 ? y : z) / uvScale);
+    }
+  }
+  const m = new THREE.Mesh(geo, mat);
+  m.position.set((u0 + u1) / 2, (y0 + y1) / 2, -(v0 + v1) / 2);
+  m.castShadow = m.receiveShadow = true;
+  parent.add(m);
+  return m;
+}
+
+// A hip roof over [u0,u1] × [v0,v1] at eave height e, with overhang o and the given slope.
+function hipRoof(parent, u0, u1, v0, v1, e, o, slope, mat) {
+  u0 -= o; u1 += o; v0 -= o; v1 += o;
+  const du = u1 - u0, dv = v1 - v0, hh = Math.min(du, dv) / 2 * slope;
+  const along = du >= dv;   // ridge runs along the longer side
+  const r = Math.min(du, dv) / 2;
+  const P = (u, v, y) => new THREE.Vector3(u, y, -v);
+  const a = P(u0, v0, e), b = P(u1, v0, e), c = P(u1, v1, e), d = P(u0, v1, e);
+  const r1 = along ? P(u0 + r, (v0 + v1) / 2, e + hh) : P((u0 + u1) / 2, v0 + r, e + hh);
+  const r2 = along ? P(u1 - r, (v0 + v1) / 2, e + hh) : P((u0 + u1) / 2, v1 - r, e + hh);
+  const tris = along
+    ? [[a, b, r2], [a, r2, r1], [c, d, r1], [c, r1, r2], [b, c, r2], [d, a, r1]]
+    : [[a, b, r1], [b, c, r2], [b, r2, r1], [c, d, r2], [d, a, r1], [d, r1, r2]];
+  const pos = [], uv = [];
+  for (const t of tris) for (const p of t) { pos.push(p.x, p.y, p.z); uv.push((p.x + p.z) / 1.6, p.y / 0.8); }
+  const geo = new THREE.BufferGeometry();
+  geo.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3));
+  geo.setAttribute('uv', new THREE.Float32BufferAttribute(uv, 2));
+  geo.computeVertexNormals();
+  const m = new THREE.Mesh(geo, mat);
+  m.castShadow = m.receiveShadow = true;
+  parent.add(m);
+  // Brackets under the eaves, the style's tell.
+  const step = 1.1;
+  for (const [x0, z0, x1, z1] of [[u0, v0, u1, v0], [u1, v0, u1, v1], [u1, v1, u0, v1], [u0, v1, u0, v0]]) {
+    const L = Math.hypot(x1 - x0, z1 - z0), n = Math.floor(L / step);
+    for (let i = 1; i < n; i++) {
+      const k = i / n, bu = x0 + (x1 - x0) * k, bv = z0 + (z1 - z0) * k;
+      const br = new THREE.Mesh(new THREE.BoxGeometry(0.14, 0.22, 0.14), parent.userData.trim);
+      const pull = 0.35;   // tuck the bracket in from the eave edge toward the wall
+      const cu = (u0 + u1) / 2, cv = (v0 + v1) / 2;
+      const tu = bu + Math.sign(cu - bu) * (Math.abs(x1 - x0) < 0.1 ? pull : 0);
+      const tv = bv + Math.sign(cv - bv) * (Math.abs(z1 - z0) < 0.1 ? pull : 0);
+      br.position.set(tu, e - 0.12, -tv);
+      parent.add(br);
+    }
+  }
+  return m;
+}
+
+// Merlons along the top edge of a bay: the crenellated parapets in the photo.
+function crenellate(parent, u0, u1, v0, v1, y, mat) {
+  hbox(parent, u0, u1, v0, v1, y, y + 0.35, mat);
+  const edges = [[u0, v0, u1, v0], [u1, v0, u1, v1], [u0, v1, u1, v1], [u0, v0, u0, v1]];
+  for (const [a0, b0, a1, b1] of edges) {
+    const L = Math.hypot(a1 - a0, b1 - b0), n = Math.max(2, Math.round(L / 0.7));
+    for (let i = 0; i <= n; i += 2) {
+      const k = i / n, cu = a0 + (a1 - a0) * k, cv = b0 + (b1 - b0) * k;
+      hbox(parent, cu - 0.18, cu + 0.18, cv - 0.18, cv + 0.18, y + 0.35, y + 0.75, mat);
+    }
+  }
+}
+
+// A window on a wall facing ±u or ±v: dark glass in a cream surround.
+function hwin(parent, face, at, along, y0, y1, w, mats, list) {
+  const t = 0.12, out = 0.06;
+  let win;
+  if (face === 'u+' || face === 'u-') {
+    const s = face === 'u+' ? 1 : -1;
+    hbox(parent, at - t + s * out, at + t + s * out, along - w / 2 - 0.12, along + w / 2 + 0.12, y0 - 0.12, y1 + 0.16, mats.trim);
+    win = hbox(parent, at - t + s * (out + 0.02), at + t + s * (out + 0.02), along - w / 2, along + w / 2, y0, y1, list ? mats.shopGlass : mats.glass);
+  } else {
+    const s = face === 'v+' ? 1 : -1;
+    hbox(parent, along - w / 2 - 0.12, along + w / 2 + 0.12, at - t + s * out, at + t + s * out, y0 - 0.12, y1 + 0.16, mats.trim);
+    win = hbox(parent, along - w / 2, along + w / 2, at - t + s * (out + 0.02), at + t + s * (out + 0.02), y0, y1, list ? mats.shopGlass : mats.glass);
+  }
+  win.castShadow = false;
+  if (list) list.push({ face, at, along, y0, y1, w, mesh: win });
+  return win;
+}
+
+function hedgeRun(parent, u0, v0, u1, v1, mats, rng) {
+  const x0 = u0, z0 = -v0, x1 = u1, z1 = -v1;
+  const L = Math.hypot(x1 - x0, z1 - z0);
+  const geo = new THREE.BoxGeometry(L, 1.7, 1.3, Math.max(2, Math.round(L / 0.8)), 3, 2);
+  const pos = geo.attributes.position;
+  for (let i = 0; i < pos.count; i++) {
+    const y = pos.getY(i);
+    pos.setXYZ(i, pos.getX(i), y + (y > 0.5 ? (rng() - 0.3) * 0.28 : 0), pos.getZ(i) + (rng() - 0.5) * 0.18);
+  }
+  geo.computeVertexNormals();
+  const m = new THREE.Mesh(geo, mats.hedge);
+  m.position.set((x0 + x1) / 2, 0.85, (z0 + z1) / 2);
+  m.rotation.y = Math.atan2(-(z1 - z0), x1 - x0);
+  m.castShadow = m.receiveShadow = true;
+  parent.add(m);
+}
+
+// The house, its porch, its hedge. Returns the group and what the transform needs.
+function buildHero801(p) {
+  const h = H801, M = heroMats();
+  const g = heroGroup(h);
+  g.userData.trim = M.trim;
+  const rng = rngFor('801-hero');
+  const [mu0, mu1, mv0, mv1] = h.main, [wu0, wu1, wv0, wv1] = h.wing;
+  const pick = [];
+  const wall = (...a) => { const m = hbox(g, ...a, M.wall, 2.4); m.userData.gpin = p.gpin; pick.push(m); return m; };
+
+  // Raised base, the main block, the rear wing.
+  hbox(g, mu0, mu1, mv0, mv1, 0, h.porchY, M.base);
+  wall(mu0, mu1, mv0, mv1, h.porchY, h.eave);
+  wall(wu0, wu1, wv0, wv1, 0, h.wingEave);
+  // Bays: two on the front, one on the Raleigh side, one on the north side; crenellated tops.
+  const bays = [[mu1, mu1 + 0.45, -5.6, -1.1], [mu1, mu1 + 0.45, 6.6, 11.1], [-4.0, 4.2, mv0 - 0.4, mv0], [2.0, 5.9, mv1, mv1 + 0.76]];
+  for (const [a0, a1, b0, b1] of bays) { wall(a0, a1, b0, b1, h.porchY, h.eave + 0.2); crenellate(g, a0 - 0.05, a1 + 0.05, b0 - 0.05, b1 + 0.05, h.eave + 0.2, M.trim); }
+  // A string course at the second floor.
+  hbox(g, mu0 - 0.05, mu1 + 0.05, mv0 - 0.05, mv1 + 0.05, 4.55, 4.7, M.trim);
+
+  // Roofs: the main hip with a hipped dormer facing Stockley, the wing's lower hip.
+  hipRoof(g, mu0, mu1, mv0, mv1, h.eave, 0.85, 0.62, M.roof);
+  hipRoof(g, wu0, wu1, wv0, wv1, h.wingEave, 0.6, 0.5, M.roof);
+  hbox(g, mu1 - 2.6, mu1 - 0.6, 1.6, 5.2, h.eave + 0.6, h.eave + 2.1, M.wall, 2.4);
+  hipRoof(g, mu1 - 2.6, mu1 - 0.6, 1.6, 5.2, h.eave + 2.1, 0.3, 0.55, M.roof);
+  const winList = [];
+  hwin(g, 'u+', mu1 - 0.55, 2.5, h.eave + 0.85, h.eave + 1.8, 0.8, M, null);
+  hwin(g, 'u+', mu1 - 0.55, 4.3, h.eave + 0.85, h.eave + 1.8, 0.8, M, null);
+
+  // Four tall chimneys.
+  for (const [cu, cv, top] of [[1.8, mv0 - 0.35, 13.2], [4.2, mv1 + 0.3, 12.9], [-6.2, 3.2, 12.6], [-13.8, -1.0, 9.6]]) {
+    hbox(g, cu - 0.45, cu + 0.45, cv - 0.38, cv + 0.38, 1.0, top, M.chimney);
+    hbox(g, cu - 0.55, cu + 0.55, cv - 0.48, cv + 0.48, top, top + 0.22, M.cap);
+  }
+
+  // Windows: two floors on the front and the Raleigh side, the balcony door over the entrance.
+  const f1 = [h.porchY + 0.55, h.porchY + 2.55], f2 = [5.1, 6.9];
+  for (const v of [-4.4, -2.3, 7.8, 9.9, 12.2]) { hwin(g, 'u+', mu1 + (v > -5.6 && v < -1.1 || v > 6.6 && v < 11.1 ? 0.45 : 0), v, ...f2, 0.9, M, null); hwin(g, 'u+', mu1 + (v > -5.6 && v < -1.1 || v > 6.6 && v < 11.1 ? 0.45 : 0), v, ...f1, 1.0, M, winList); }
+  hwin(g, 'u+', mu1, 3.5, 4.95, 7.1, 1.1, M, null);          // balcony door
+  hwin(g, 'u+', mu1, 1.0, ...f2, 0.9, M, null);
+  hwin(g, 'u+', mu1, 1.1, ...f1, 1.0, M, winList);
+  hwin(g, 'u+', mu1, 5.9, ...f1, 1.0, M, winList);
+  for (const u of [-7.5, -5.6, -2.7, -0.4, 1.9, 4.8]) { const bay = u > -4.0 && u < 4.2; hwin(g, 'v-', mv0 - (bay ? 0.4 : 0), u, ...f2, 0.9, M, null); hwin(g, 'v-', mv0 - (bay ? 0.4 : 0), u, ...f1, 1.0, M, winList); }
+  for (const u of [-6.5, -3.0, 0.5]) hwin(g, 'v+', mv1, u, ...f2, 0.9, M, null);
+
+  // The front door under the porch, with sidelights.
+  hbox(g, mu1, mu1 + 0.12, 2.75, 4.25, h.porchY, h.porchY + 2.5, M.trim);
+  const door = hbox(g, mu1 + 0.1, mu1 + 0.16, 3.05, 3.95, h.porchY, h.porchY + 2.3, new THREE.MeshLambertMaterial({ color: 0x5a3a24 }));
+
+  // The porch: deck, skirt, columns (paired at the corners and the entrance), balustrade, roof.
+  const pY = h.porchY, pT = h.porchTop;
+  const strips = [[mu1, 9.7, -8.53, mv1], [9.7, 10.5, -0.2, 7.3], [-8.82, 4.11, -10.3, mv0], [4.11, mu1, -8.53, mv0]];
+  for (const [a0, a1, b0, b1] of strips) { hbox(g, a0, a1, b0, b1, 0, pY - 0.08, M.base); hbox(g, a0, a1, b0, b1, pY - 0.08, pY, M.deck); }
+  const colAt = [];
+  const front = 9.45, side = -10.05;
+  for (const v of [-8.25, -4.4, 2.6, 4.4]) colAt.push([front, v]);
+  for (const v of [-0.05, 7.15]) colAt.push([10.3, v]);
+  colAt.push([front, 10.2], [front, 12.9]);
+  for (const u of [-8.5, -4.6, -0.7, 3.85]) colAt.push([u, side]);
+  colAt.push([6.6, -8.3]);
+  for (const [cu, cv] of colAt) {
+    for (const off of [-0.17, 0.17]) {
+      const c = new THREE.Mesh(new THREE.CylinderGeometry(0.11, 0.13, pT - pY - 0.3, 12), M.white);
+      const pairAlongV = Math.abs(cu) > 9;   // front columns pair along v, side columns along u
+      c.position.set(cu + (pairAlongV ? 0 : off), pY + 0.15 + (pT - pY - 0.3) / 2, -(cv + (pairAlongV ? off : 0)));
+      c.castShadow = true;
+      g.add(c);
+    }
+    hbox(g, cu - 0.32, cu + 0.32, cv - 0.32, cv + 0.32, pY, pY + 0.15, M.white);
+    hbox(g, cu - 0.32, cu + 0.32, cv - 0.32, cv + 0.32, pT - 0.15, pT, M.white);
+  }
+  // Balustrade: top and bottom rails with instanced balusters, open at the front steps.
+  const rails = [[front, -8.25, front, -0.2], [10.3, -0.05, 10.3, 2.4], [10.3, 4.6, 10.3, 7.15], [front, 7.3, front, 12.9],
+    [-8.5, side, 3.85, side], [3.85, side, 3.85, -8.3], [3.85, -8.3, front, -8.3]];
+  const balGeo = new THREE.BoxGeometry(0.05, 0.62, 0.05);
+  const balCount = rails.reduce((s, [a0, b0, a1, b1]) => s + Math.ceil(Math.hypot(a1 - a0, b1 - b0) / 0.15), 0);
+  const balusters = new THREE.InstancedMesh(balGeo, M.white, balCount);
+  let k = 0;
+  const m4 = new THREE.Matrix4();
+  for (const [a0, b0, a1, b1] of rails) {
+    const L = Math.hypot(a1 - a0, b1 - b0);
+    if (Math.abs(a1 - a0) < 0.01) { hbox(g, a0 - 0.06, a0 + 0.06, Math.min(b0, b1), Math.max(b0, b1), pY + 0.8, pY + 0.88, M.white); hbox(g, a0 - 0.05, a0 + 0.05, Math.min(b0, b1), Math.max(b0, b1), pY + 0.08, pY + 0.13, M.white); }
+    else { hbox(g, Math.min(a0, a1), Math.max(a0, a1), b0 - 0.06, b0 + 0.06, pY + 0.8, pY + 0.88, M.white); hbox(g, Math.min(a0, a1), Math.max(a0, a1), b0 - 0.05, b0 + 0.05, pY + 0.08, pY + 0.13, M.white); }
+    for (let s = 0.08; s < L; s += 0.15) {
+      const t = s / L;
+      balusters.setMatrixAt(k++, m4.makeTranslation(a0 + (a1 - a0) * t, pY + 0.46, -(b0 + (b1 - b0) * t)));
+    }
+  }
+  balusters.count = k;
+  balusters.castShadow = true;
+  g.add(balusters);
+  // Porch roof: a low hip with a tiled edge and a white fascia.
+  const roofs = [[mu1, 9.75, -8.6, mv1], [-8.9, mu1, -10.38, mv0]];
+  for (const [a0, a1, b0, b1] of roofs) { hbox(g, a0, a1, b0, b1, pT, pT + 0.22, M.trim); }
+  hbox(g, 9.75, 10.55, -0.25, 7.35, pT, pT + 0.22, M.trim);
+  for (const [a0, a1, b0, b1] of [[mu1, 9.85, -8.7, mv1], [-9.0, mu1, -10.48, mv0]]) hbox(g, a0, a1, b0, b1, pT + 0.22, pT + 0.36, M.roof, 1.2);
+  // The balcony on the porch roof over the entrance: a white balustrade.
+  for (const [a0, b0, a1, b1] of [[mu1, 1.6, 10.4, 1.6], [10.4, 1.6, 10.4, 5.4], [10.4, 5.4, mu1, 5.4]]) {
+    const L = Math.hypot(a1 - a0, b1 - b0);
+    if (Math.abs(a1 - a0) < 0.01) hbox(g, a0 - 0.06, a0 + 0.06, Math.min(b0, b1), Math.max(b0, b1), pT + 1.15, pT + 1.25, M.white);
+    else hbox(g, Math.min(a0, a1), Math.max(a0, a1), b0 - 0.06, b0 + 0.06, pT + 1.15, pT + 1.25, M.white);
+    for (let s = 0.1; s < L; s += 0.22) { const t = s / L; hbox(g, a0 + (a1 - a0) * t - 0.05, a0 + (a1 - a0) * t + 0.05, b0 + (b1 - b0) * t - 0.05, b0 + (b1 - b0) * t + 0.05, pT + 0.36, pT + 1.15, M.white); }
+  }
+  // Front steps from the walk up to the entrance.
+  const nSteps = 5, rise = pY / nSteps;
+  for (let i = 1; i <= nSteps; i++) hbox(g, 10.5, 10.5 + (nSteps - i + 1) * 0.3, 2.45, 4.55, 0, i * rise, M.deck);
+  // The walk through the hedge, and the hedge along both streets.
+  // The lot lines, in the hero's frame, from the parcel itself.
+  const lot = p.poly.map(([x, y]) => [(x - h.c[0]) * h.U[0] + (y - h.c[1]) * h.U[1], (x - h.c[0]) * h.V[0] + (y - h.c[1]) * h.V[1]]);
+  const uMax = Math.max(...lot.map((q) => q[0])), uMin = Math.min(...lot.map((q) => q[0]));
+  const vMin = Math.min(...lot.map((q) => q[1])), vMax = Math.max(...lot.map((q) => q[1]));
+  const hu = uMax - 0.9, hv = vMin + 0.9;   // the hedge stands just inside the lot lines facing the streets
+  hbox(g, 10.5, hu, 2.6, 4.4, 0, 0.03, M.path);
+  hedgeRun(g, hu, hv, hu, 2.4, M, rng);          // along Stockley, from the corner to the walk
+  hedgeRun(g, hu, 4.6, hu, vMax - 0.6, M, rng);  // along Stockley, past the walk
+  hedgeRun(g, hu, hv, uMin + 1, hv, M, rng);     // along Raleigh
+  for (const [tu, tv] of [[16.5, 14.5], [-13, -14.2]]) { const t = tree(0, 0); t.position.set(tu, 0, -tv); t.scale.setScalar(1.35); g.add(t); }
+
+  return { group: g, pick, winList, door, mats: M, lot: { hu, hv } };
+}
+
+// The porch café: the house stays as it is; the porch fills, the shop floor lights up.
+function heroTransform801(kit, p) {
+  const h = H801, hero = p.hero, M = hero.mats;
+  const g = heroGroup(h);
+  const tweens = [];
+  const at = (t0, t1, fn) => tweens.push({ t0, t1, fn });
+  const pY = h.porchY, pT = h.porchTop, mu1 = h.main[1];
+  const paint = PAINTS[kit.id][0], trim = '#efe6d2';
+  const rng = rngFor(`801:${kit.id}`);
+
+  // Shop windows and the door glow; the glass shows the kit's interior.
+  M.shopGlass.emissiveMap = windowTexture(kit.window);
+  M.shopGlass.needsUpdate = true;
+  at(0.08, 0.4, (k) => { M.shopGlass.emissiveIntensity = 0.85 * ease(k); hero.door.material.emissive = new THREE.Color(0x6b3a10); hero.door.material.emissiveIntensity = 0.6 * ease(k); });
+  // Gold lettering on the two windows flanking the door.
+  const lettering = letteringTex(kit.sign, kit.signFont);
+  for (const v of [1.1, 5.9]) {
+    const plane = new THREE.Mesh(new THREE.PlaneGeometry(1.0, 0.5), new THREE.MeshBasicMaterial({ map: lettering, transparent: true, depthWrite: false, opacity: 0 }));
+    plane.rotation.y = Math.PI / 2;
+    plane.position.set(mu1 + 0.3, pY + 1.15, -v);
+    g.add(plane);
+    at(0.3, 0.5, (k) => { plane.material.opacity = ease(k); });
+  }
+  // A sign hung from the porch roof at the entrance, facing the street.
+  const icon = new THREE.MeshStandardMaterial({ map: iconTex(ICONS[kit.id], paint, trim) });
+  const signG = new THREE.Group();
+  const board = new THREE.Mesh(new THREE.BoxGeometry(0.035, 0.52, 0.72), [icon, icon, std(paint), std(paint), std(paint), std(paint)]);
+  board.position.y = -0.62;
+  board.castShadow = true;
+  signG.add(board);
+  for (const z of [-0.26, 0.26]) box(signG, 0.012, 0.36, 0.012, 0, -0.18, z, std(0x1d1b19), false);
+  signG.position.set(10.25, pT, -3.5);
+  signG.scale.y = 0.001;
+  g.add(signG);
+  at(0.32, 0.5, (k) => { signG.scale.y = Math.max(0.001, ease(k)); });
+  // Lanterns at the entrance columns, a warm light on the porch.
+  const lanternMat = new THREE.MeshStandardMaterial({ color: 0xfff1c9, emissive: kit.glow, emissiveIntensity: 0 });
+  for (const v of [-0.05, 7.15]) { const l = new THREE.Mesh(new THREE.BoxGeometry(0.16, 0.26, 0.16), lanternMat); l.position.set(10.3, pY + 2.2, -(v + (v < 3 ? 0.45 : -0.45))); g.add(l); }
+  const lamp = new THREE.PointLight(kit.glow, 0, 18, 1.6);
+  lamp.position.set(8.6, pY + 2.3, -3.5);
+  g.add(lamp);
+  at(0.35, 0.6, (k) => { lanternMat.emissiveIntensity = 2.2 * ease(k); lamp.intensity = (DARK ? 50 : 26) * ease(k); });
+
+  // Tables along the front porch and down the Raleigh side.
+  const spots = [[8.35, -6.6, 0], [8.35, -3.0, 0], [8.35, 9.2, 0], [8.35, 11.8, 0], [-6.6, -8.55, 1], [-2.7, -8.55, 1], [1.2, -8.55, 1]];
+  const n = kit.id === 'bistro' ? 7 : kit.id === 'coffee' ? 5 : kit.id === 'books' ? 2 : 0;
+  const props = [];
+  const seats = [];
+  spots.slice(0, n).forEach(([u, v, side]) => {
+    const t = table(kit.id === 'bistro' ? 0xf4ead6 : 0xf2ece0);
+    t.position.set(u, pY, -v);
+    t.rotation.y = side ? Math.PI / 2 : 0;
+    t.scale.setScalar(0.001);
+    g.add(t);
+    props.push(t);
+    seats.push(side ? [u - 0.62, v, Math.PI / 2] : [u, v - 0.62, 0]);
+  });
+  if (kit.id === 'books') { const c = bookCart(); c.position.set(8.4, pY, -1.0); c.rotation.y = Math.PI / 2; c.scale.setScalar(0.001); g.add(c); props.push(c); }
+  if (kit.id === 'studio') { for (const [u, v] of [[8.4, -5.0], [8.4, 10.5]]) { const b = bench(); b.position.set(u, pY, -v); b.rotation.y = -Math.PI / 2; b.scale.setScalar(0.001); g.add(b); props.push(b); } }
+  const af = aFrame(kit.id === 'bistro' ? 'tonight' : kit.id === 'books' ? 'used & new' : kit.id === 'studio' ? 'open studio' : 'espresso');
+  af.position.set(hero.lot.hu + 1.4, 0, -5.2);
+  af.rotation.y = Math.PI / 2 - 0.4;
+  af.scale.setScalar(0.001);
+  g.add(af);
+  props.push(af);
+  props.forEach((o, i) => at(0.45 + i * 0.03, 0.62 + i * 0.03, (k) => o.scale.setScalar(Math.max(0.001, ease(k)))));
+
+  if (kit.id === 'bistro') {
+    const bulbMat = new THREE.MeshStandardMaterial({ color: 0xfff1c9, emissive: kit.glow, emissiveIntensity: 0 });
+    const bulb = new THREE.SphereGeometry(0.06, 8, 6);
+    const runs = [[9.6, -8.4, 9.6, -0.2], [9.6, 7.3, 9.6, 12.9], [-8.6, -10.2, 3.8, -10.2]];
+    for (const [u0, v0, u1, v1] of runs) {
+      const L = Math.hypot(u1 - u0, v1 - v0), nB = Math.round(L / 0.45);
+      for (let i = 0; i <= nB; i++) {
+        const t = i / nB, m = new THREE.Mesh(bulb, bulbMat);
+        m.position.set(u0 + (u1 - u0) * t, pT - 0.18 - Math.sin((t * L / 3.6) % 1 * Math.PI) * 0.22, -(v0 + (v1 - v0) * t));
+        g.add(m);
+      }
+    }
+    at(0.55, 0.75, (k) => { bulbMat.emissiveIntensity = 2.4 * ease(k); });
+  }
+
+  // People: seated at the tables, one at the door, two coming up the walk.
+  const folk = [];
+  seats.forEach(([u, v, rot], i) => {
+    if (i >= kit.people) return;
+    const who = person(rng);
+    who.sit();
+    who.group.position.set(u, pY, -v);
+    who.group.rotation.y = rot === 0 ? Math.PI : Math.PI / 2;
+    who.group.visible = false;
+    g.add(who.group);
+    at(0.5 + i * 0.04, 0.52 + i * 0.04, (k) => { who.group.visible = k > 0; });
+  });
+  const greeter = person(rng); greeter.stand(); greeter.group.position.set(9.9, pY, -2.9); greeter.group.rotation.y = Math.PI / 2; greeter.group.visible = false; g.add(greeter.group);
+  at(0.55, 0.57, (k) => { greeter.group.visible = k > 0; });
+  for (let i = 0; i < 2; i++) {
+    const who = person(rng);
+    const from = new THREE.Vector3(hero.lot.hu + 3.5, 0, -(3.0 + i * 0.8) + (i ? -6 : 6));
+    const to = new THREE.Vector3(13.5 + i * 1.2, 0, -(3.2 + i * 0.6));
+    who.group.position.copy(from);
+    who.group.visible = false;
+    g.add(who.group);
+    at(0.55 + i * 0.08, 0.95, (k) => {
+      who.group.visible = k > 0;
+      const mid = new THREE.Vector3(hero.lot.hu + 1.0, 0, -(3.4 + i * 0.4));
+      const kk = ease(k);
+      if (kk < 0.4) who.group.position.lerpVectors(from, mid, kk / 0.4); else who.group.position.lerpVectors(mid, to, (kk - 0.4) / 0.6);
+      who.group.rotation.y = kk < 0.4 ? Math.atan2(mid.x - from.x, mid.z - from.z) : -Math.PI / 2;
+      if (k < 1) who.walk(k * 26); else who.stand();
+    });
+  }
+
+  const cleanup = () => { M.shopGlass.emissiveIntensity = 0; hero.door.material.emissiveIntensity = 0; };
+  return { root: g, tweens, variant: 'hero', cleanup, view: { hero: true } };
+}
+
+// Where to stand: the corner of Stockley and Raleigh, looking at the porch, like the assessor did.
+function heroView(mode) {
+  const h = H801;
+  if (mode === 'street') {
+    // A little above eye level, back toward the corner, so both arms of the porch show over the hedge.
+    const [px, py] = huv(h, 27.5, -10.5), [tx, ty] = huv(h, 5.5, 0.5);
+    return { pos: to3(px, py, 4.4), target: to3(tx, ty, 2.4) };
+  }
+  const [px, py] = huv(h, 34, -24), [tx, ty] = huv(h, 2, 0.5);
+  return { pos: to3(px, py, 12), target: to3(tx, ty, 4) };
 }
 
 // ── Frame ──
