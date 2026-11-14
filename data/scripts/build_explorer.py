@@ -9,6 +9,9 @@ Everything comes from the City of Norfolk's public GIS server and open-data port
   Addresses        data.norfolk.gov      ere7-kake  (Address Information)
   Assessment FY26  data.norfolk.gov      m5ya-5grb  (use, class, year built, lot size; owner is NOT kept)
   Assessor photos  api.spatialest.com    the city assessor's photo index (the photos stay on gisshare.norfolk.gov)
+  Trees            data.norfolk.gov      cmvv-agyb  (City Tree Inventory: species, trunk diameter, location)
+                   (The Significant Trees list, jz6u-9g3c, is left out: its coordinates are rounded to three
+                   decimal places, about 100 m, too coarse to stand a tree on a lot.)
 
 Geometry is requested in Virginia State Plane South (EPSG:2284, US feet) and written in metres,
 relative to the district's centre, with +x east and +y north.
@@ -87,6 +90,24 @@ def geom(f):
     return shape(g) if g else None
 
 
+def tree_form(name, genus):
+    """A drawing form for a tree, from its common name or genus."""
+    n = f"{name or ''} {genus or ''}".lower()
+    for form, words in (
+        ("crape", ("crape", "lagerstroemia")),
+        ("plane", ("sycamore", "planetree", "plane tree", "platanus")),
+        ("pine", ("pine", "pinus")),
+        ("cone", ("cedar", "juniper", "cypress", "holly", "ilex", "spruce", "arborvitae")),
+        ("evergreen", ("magnolia", "live oak", "virginiana")),
+        ("small", ("dogwood", "redbud", "cherry", "plum", "crabapple", "pear", "hawthorn", "myrtle", "serviceberry", "vitex")),
+        ("oak", ("oak", "quercus", "elm", "ulmus", "ginkgo", "tulip", "liriodendron", "hackberry", "zelkova", "linden")),
+        ("maple", ("maple", "acer", "ash", "fraxinus", "birch", "sweetgum", "liquidambar", "gum")),
+    ):
+        if any(w in n for w in words):
+            return form
+    return "round"
+
+
 def affine_fit(pairs):
     """Least-squares lat = a·x + b·y + c and lng = d·x + e·y + f, from (x, y, lat, lng) samples."""
     n = len(pairs)
@@ -108,7 +129,13 @@ def affine_fit(pairs):
         return a, b, mv - a * mx - b * my
 
     la, lo = solve(2), solve(3)
-    return lambda x, y: (la[0] * x + la[1] * y + la[2], lo[0] * x + lo[1] * y + lo[2])
+    to_ll = lambda x, y: (la[0] * x + la[1] * y + la[2], lo[0] * x + lo[1] * y + lo[2])
+    det2 = la[0] * lo[1] - la[1] * lo[0]
+    def from_ll(lat, lng):   # the inverse, for points the city gives in latitude/longitude
+        a, b = lat - la[2], lng - lo[2]
+        return ((a * lo[1] - b * la[1]) / det2, (la[0] * b - lo[0] * a) / det2)
+    to_ll.inverse = from_ll
+    return to_ll
 
 
 def main():
@@ -254,6 +281,29 @@ def main():
                 pass
             time.sleep(0.2)
 
+    # 7. Trees: the city's inventory, mostly street and public trees. Diameter is the trunk at breast
+    #    height, in inches: a measurement where there is one, else the middle of its range, else 0 (unknown).
+    corners = [to_ll(x, y) for x, y in ((env[0], env[1]), (env[2], env[3]), (env[0], env[3]), (env[2], env[1]))]
+    lat0, lat1 = min(c[0] for c in corners), max(c[0] for c in corners)
+    lng0, lng1 = min(c[1] for c in corners), max(c[1] for c in corners)
+    inventory = get_json(f"{SOCRATA}/cmvv-agyb.json", {
+        "$select": "common_name,genus,trunk_diameter,trunk_diameter_range,latitude,longitude",
+        "$where": f"within_box(latitude_longitude_point,{lat1},{lng0},{lat0},{lng1})", "$limit": 20000})
+    ranges = {'0" to 6"': 3, '6" to 12"': 9, '12" to 18"': 15, '18" to 24"': 21, '24" to 30"': 27,
+              '30" to 36"': 33, '36" to 42"': 39, '42" to 48"': 45, '48" +': 50}
+    trees = []
+    for t in inventory:
+        try:
+            x, y = to_ll.inverse(float(t["latitude"]), float(t["longitude"]))
+        except (KeyError, TypeError, ValueError):
+            continue
+        dbh = None
+        try:
+            dbh = float(t.get("trunk_diameter")) if t.get("trunk_diameter") else ranges.get(t.get("trunk_diameter_range"))
+        except ValueError:
+            dbh = ranges.get(t.get("trunk_diameter_range"))
+        trees.append([*local(x, y), tree_form(t.get("common_name"), t.get("genus")), round(dbh or 0, 1), (t.get("common_name") or "").strip()])
+
     def num(v):
         try:
             return int(float(v))
@@ -298,6 +348,7 @@ def main():
         "g3": [ring(q) for q in polys(g3)],
         "parcels": out_parcels,
         "buildings": buildings,
+        "trees": trees,
         "streets": [{"name": s["name"], "kind": s["row"],  # the layer's ROW field is a class: residential, arterial/collector
                      "line": [local(x, y) for x, y in s["geom"].intersection(clip).coords]}
                     for s in streets if isinstance(s["geom"].intersection(clip), LineString)
@@ -309,7 +360,7 @@ def main():
     corners = sum(1 for p in out_parcels if p["corner"])
     photos = sum(1 for p in out_parcels if p["photo"])
     print(f"{len(out_parcels)} parcels ({corners} corner, {photos} with photos), "
-          f"{len(buildings)} buildings, {len(out['streets'])} street pieces → {os.path.relpath(OUT)} "
+          f"{len(buildings)} buildings, {len(trees)} trees, {len(out['streets'])} street pieces → {os.path.relpath(OUT)} "
           f"({os.path.getsize(OUT) // 1024} KB)")
 
 

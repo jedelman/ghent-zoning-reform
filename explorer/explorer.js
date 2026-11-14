@@ -173,6 +173,11 @@ function fillLot(p) {
     ['Built', p.built || '—'],
     ['Lot', p.lot_sqft ? `${fmt(p.lot_sqft)} sq ft` : '—'],
   ];
+  const trees = treesFor(p);
+  if (trees.length) {
+    const named = trees.slice(0, 4).map((t) => `${(t[4] || 'tree').toLowerCase().replace(/^./, (c) => c.toUpperCase())}${t[3] ? ` ${t[3]}″` : ''}`);
+    facts.push(['Trees', named.join(', ') + (trees.length > 4 ? `, and ${trees.length - 4} more` : '')]);
+  }
   $('lot-facts').replaceChildren(...facts.flatMap(([k, v]) => {
     const dt = document.createElement('dt'); dt.textContent = k;
     const dd = document.createElement('dd'); dd.textContent = v;
@@ -298,6 +303,7 @@ function initThree() {
   buildRoads();
   buildLots();
   buildBuildings();
+  buildTrees();
   buildLabels();
   flyHome(true);
 
@@ -409,6 +415,149 @@ function buildBuildings() {
     m.castShadow = m.receiveShadow = true;
     three.scene.add(m);
   }
+}
+
+// ── Trees: the city's inventory ──
+// Where each tree stands, its species and its trunk diameter are the city's. Height and crown
+// aren't in the inventory: they're drawn from the diameter with a rough growth curve per form
+// (metres: base + per cm of trunk, up to a cap), so the shapes are approximate.
+const TREE_FORMS = {
+  oak:       { h: [4.9, 0.23, 24], r: [1.2, 0.105, 10], vs: 0.72, leaf: 0x5f7d4f, bark: 0x5a4636 },
+  plane:     { h: [5, 0.24, 26], r: [1.2, 0.1, 10], vs: 0.78, leaf: 0x6f8a52, bark: 0xb9ae94 },
+  maple:     { h: [4, 0.25, 20], r: [1.1, 0.11, 8], vs: 0.85, leaf: 0x6b8a4a, bark: 0x5f4d3d },
+  round:     { h: [4, 0.24, 18], r: [1.1, 0.1, 7.5], vs: 0.8, leaf: 0x66844f, bark: 0x5a4636 },
+  crape:     { h: [2.5, 0.22, 9], r: [0.9, 0.1, 4], vs: 0.75, leaf: 0x7a9455, bark: 0xa08770 },
+  small:     { h: [2.5, 0.17, 9], r: [1, 0.1, 5], vs: 0.62, leaf: 0x6e8c55, bark: 0x5a4636 },
+  pine:      { h: [5, 0.33, 28], r: [1, 0.06, 5], vs: 1, leaf: 0x3f5e45, bark: 0x6a5240 },
+  cone:      { h: [3, 0.24, 15], r: [0.8, 0.05, 3], vs: 1, leaf: 0x3c5a40, bark: 0x5a4636 },
+  evergreen: { h: [3.5, 0.2, 16], r: [1.2, 0.13, 11], vs: 0.6, leaf: 0x40603f, bark: 0x4f4134 },
+};
+const TREE_UNKNOWN_DBH = 7;   // the inventory's median, for the few trees it gives no size
+
+function buildTrees() {
+  const trees = (data.trees || []).map(([x, y, form, dbh, name]) => {
+    const F = TREE_FORMS[form] || TREE_FORMS.round;
+    const cm = (dbh || TREE_UNKNOWN_DBH) * 2.54;
+    const rnd = rngFor(`${x},${y}`);
+    const j = 0.9 + rnd() * 0.2;
+    return { x, y, form, F, rnd, dbh, name,
+      H: Math.min(F.h[0] + F.h[1] * cm, F.h[2]) * j,
+      R: Math.min(F.r[0] + F.r[1] * cm, F.r[2]) * (0.9 + rnd() * 0.2),
+      T: Math.max(0.07, (cm / 200) * 1.15) };
+  });
+  three.trees = trees;
+
+  const trunks = [], lobes = [], cones = [];
+  const add = (list, color, pos, scale, rot = [0, 0, 0]) => list.push({ color, pos, scale, rot });
+  const leafColor = (t) => {
+    const c = new THREE.Color(t.F.leaf).offsetHSL((t.rnd() - 0.5) * 0.03, (t.rnd() - 0.5) * 0.12, (t.rnd() - 0.5) * 0.08);
+    return DARK ? c.multiplyScalar(0.55) : c;
+  };
+  const barkColor = (t) => { const c = new THREE.Color(t.F.bark); return DARK ? c.multiplyScalar(0.6) : c; };
+  for (const t of trees) {
+    const { x, y, H, R, T, F } = t;
+    const P = (du, h, dv) => to3(x + du, y + dv, h);
+    const yaw = t.rnd() * Math.PI * 2, cy = Math.cos(yaw), sy = Math.sin(yaw);
+    const off = (a, b) => [a * cy - b * sy, a * sy + b * cy];   // a crown offset, turned by the tree's yaw
+    const lobe = (du, dv, h, sx, sv, c) => add(lobes, c, P(du, h, dv), [sx, sv, sx], [t.rnd() * 3, t.rnd() * 3, t.rnd() * 3]);
+    const leaf = leafColor(t), bark = barkColor(t);
+    // The crown as one ellipsoid (centre height, radii) and the trunk's top, for sight lines.
+    if (t.form === 'cone') Object.assign(t, { cc: H * 0.5, cr: R * 0.75, cv: H * 0.42, top: H * 0.15 });
+    else if (t.form === 'pine') { const Rv = Math.min(H * 0.17, R * 1.3); Object.assign(t, { cc: H - Rv * 1.3, cr: R, cv: Rv * 1.6, top: H - Rv * 2 }); }
+    else { const Rv = R * F.vs; Object.assign(t, { cc: H - Rv, cr: R, cv: Rv, top: H - Rv * 1.8 }); }
+    if (t.form === 'cone') {
+      add(trunks, bark, P(0, 0, 0), [T, H * 0.2, T]);
+      add(cones, leaf, P(0, H * 0.1, 0), [R, H * 0.9, R], [0, yaw, 0]);
+    } else if (t.form === 'pine') {
+      const Rv = Math.min(H * 0.17, R * 1.3), c = H - Rv;
+      add(trunks, bark, P(0, 0, 0), [T, c + Rv * 0.4, T]);
+      lobe(0, 0, c, R, Rv, leaf);
+      const [a, b] = off(R * 0.55, 0), [a2, b2] = off(-R * 0.4, R * 0.35);
+      lobe(a, b, c - Rv * 0.7, R * 0.6, Rv * 0.6, leaf);
+      lobe(a2, b2, c - Rv * 1.1, R * 0.5, Rv * 0.5, leaf);
+    } else if (t.form === 'crape') {
+      // Several stems from the ground, splayed, each carrying a small crown: a vase.
+      const Rv = R * F.vs, c = H - Rv;
+      for (let k = 0; k < 3; k++) {
+        const ang = yaw + (k * Math.PI * 2) / 3, lean = 0.22;
+        const L = c / Math.cos(lean);
+        // A cylinder leaning outward: rotate about the horizontal axis at right angles to its lean.
+        const e = new THREE.Euler().setFromQuaternion(new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(Math.sin(ang), 0, Math.cos(ang)), lean));
+        add(trunks, bark, P(0, 0, 0), [T * 0.55, L, T * 0.55], [e.x, e.y, e.z]);
+        const reach = Math.sin(lean) * L;
+        const du = Math.cos(ang) * reach, dv = Math.sin(ang) * reach;
+        lobe(du, dv, c, R * 0.62, Rv * 0.7, leaf);
+      }
+      lobe(0, 0, c + Rv * 0.25, R * 0.6, Rv * 0.6, leaf);
+    } else {
+      const Rv = R * F.vs, c = H - Rv;
+      add(trunks, bark, P(0, 0, 0), [T, c + Rv * 0.3, T]);
+      lobe(0, 0, c, R * 0.92, Rv * 0.92, leaf);
+      const [a, b] = off(R * 0.42, 0), [a2, b2] = off(-R * 0.32, R * 0.38);
+      lobe(a, b, c + Rv * 0.3, R * 0.62, Rv * 0.62, leaf);
+      lobe(a2, b2, c + Rv * 0.12, R * 0.58, Rv * 0.58, leaf);
+    }
+  }
+
+  // Three instanced meshes for the whole district: trunks, leafy crowns, conifers.
+  const trunkGeo = new THREE.CylinderGeometry(0.6, 1, 1, 6);
+  trunkGeo.translate(0, 0.5, 0);
+  const coneGeo = new THREE.ConeGeometry(1, 1, 7);
+  coneGeo.translate(0, 0.5, 0);
+  const m4 = new THREE.Matrix4(), q = new THREE.Quaternion(), e = new THREE.Euler(), sc = new THREE.Vector3();
+  const instanced = (geo, list, rough) => {
+    if (!list.length) return null;
+    const mat = new THREE.MeshStandardMaterial({ color: 0xffffff, roughness: rough, metalness: 0, flatShading: true });
+    const m = new THREE.InstancedMesh(geo, mat, list.length);
+    list.forEach((o, i) => {
+      q.setFromEuler(e.set(...o.rot));
+      m.setMatrixAt(i, m4.compose(o.pos, q, sc.set(...o.scale)));
+      m.setColorAt(i, o.color);
+    });
+    m.castShadow = true;
+    m.receiveShadow = true;
+    three.scene.add(m);
+    return m;
+  };
+  instanced(trunkGeo, trunks, 0.95);
+  instanced(new THREE.IcosahedronGeometry(1, 1), lobes, 0.9);
+  instanced(coneGeo, cones, 0.9);
+}
+
+// The trees on a lot or at its curb: inside its lines, or within 6 m of one and abreast of it (not
+// past its ends, which would be the neighbour's curb), and not on another lot.
+function pointInPoly([x, y], poly) {
+  let inside = false;
+  for (let i = 0, j = poly.length - 1; i < poly.length; j = i++) {
+    const [xi, yi] = poly[i], [xj, yj] = poly[j];
+    if ((yi > y) !== (yj > y) && x < ((xj - xi) * (y - yi)) / (yj - yi) + xi) inside = !inside;
+  }
+  return inside;
+}
+
+function treesFor(p) {
+  if (!data.trees) return [];
+  const [cx, cy] = polyCentroid(p.poly);
+  const reach = Math.max(...p.poly.map(([x, y]) => Math.hypot(x - cx, y - cy))) + 6;
+  const abreast = ([x, y]) => p.poly.some(([ax, ay], i) => {
+    const [bx, by] = p.poly[(i + 1) % p.poly.length];
+    const dx = bx - ax, dy = by - ay, L2 = dx * dx + dy * dy || 1;
+    const k = ((x - ax) * dx + (y - ay) * dy) / L2;
+    return k > 0 && k < 1 && Math.abs((x - ax) * dy - (y - ay) * dx) / Math.sqrt(L2) <= 6;
+  });
+  const out = [];
+  for (const t of data.trees) {
+    if (Math.hypot(t[0] - cx, t[1] - cy) > reach) continue;
+    const pt = [t[0], t[1]];
+    if (!pointInPoly(pt, p.poly)) {
+      if (!abreast(pt)) continue;
+      let other = false;
+      for (const q of parcels.values()) if (q !== p && pointInPoly(pt, q.poly)) { other = true; break; }
+      if (other) continue;
+    }
+    out.push(t);
+  }
+  return out.sort((a, b) => b[3] - a[3]);
 }
 
 function textTexture(text, font, ink, bg, w = 1024, h = 256) {
@@ -550,21 +699,90 @@ function flyHome(instant = false) {
   fly(to, instant);
 }
 
+// How much of a facade the street trees hide from a camera: the share of sight lines, from the
+// camera to points on the facade, that pass through a crown or a trunk. The trees stay; the camera
+// looks for the gap between them.
+function sightBlocked(pos, points) {
+  const trees = three.trees || [];
+  let blocked = 0;
+  for (const q of points) {
+    const x0 = Math.min(pos.x, q.x) - 12, x1 = Math.max(pos.x, q.x) + 12;
+    const z0 = Math.min(pos.z, q.z) - 12, z1 = Math.max(pos.z, q.z) + 12;
+    const dx = q.x - pos.x, dy = q.y - pos.y, dz = q.z - pos.z;
+    for (const t of trees) {
+      const tz = -t.y;
+      if (t.x < x0 || t.x > x1 || tz < z0 || tz > z1) continue;
+      // The crown, shrunk a little: its fringe is the part you see through.
+      const rx = t.cr * 0.85, ry = t.cv * 0.85;
+      const ax = (pos.x - t.x) / rx, ay = (pos.y - t.cc) / ry, az = (pos.z - tz) / rx;
+      const bx = dx / rx, by = dy / ry, bz = dz / rx;
+      const A = bx * bx + by * by + bz * bz, B = 2 * (ax * bx + ay * by + az * bz), C = ax * ax + ay * ay + az * az - 1;
+      const disc = B * B - 4 * A * C;
+      if (disc >= 0) {
+        const r = Math.sqrt(disc), k0 = (-B - r) / (2 * A), k1 = (-B + r) / (2 * A);
+        if (k1 > 0 && k0 < 1) { blocked++; break; }
+      }
+      // The trunk: closest approach in plan, below the crown.
+      const L2 = dx * dx + dz * dz || 1;
+      const k = Math.max(0, Math.min(1, ((t.x - pos.x) * dx + (tz - pos.z) * dz) / L2));
+      if (Math.hypot(pos.x + k * dx - t.x, pos.z + k * dz - tz) < t.T + 0.2 && pos.y + k * dy < t.top) { blocked++; break; }
+    }
+  }
+  return blocked / points.length;
+}
+
+// A trunk standing dead centre between the camera and what it looks at cuts the picture in half:
+// a cost for each one, by how near the middle of the view it stands.
+function trunksInMiddle(pos, target) {
+  const vx = target.x - pos.x, vz = target.z - pos.z, D = Math.hypot(vx, vz) || 1;
+  let cost = 0;
+  for (const t of three.trees || []) {
+    const tx = t.x - pos.x, tz = -t.y - pos.z;
+    const ahead = (tx * vx + tz * vz) / D;
+    if (ahead < 1 || ahead > D) continue;
+    const ang = Math.abs(Math.atan2(tx * vz - tz * vx, tx * vx + tz * vz));
+    if (ang < 0.2) cost += 1 - ang / 0.2;
+  }
+  return cost;
+}
+
+// Of several camera stands, the one that sees the most of the facade, then the one nearest the first.
+function bestStand(stands, points, target = null) {
+  let best = null;
+  for (const s of stands) {
+    const cost = sightBlocked(s.pos, points) * 10 + s.cost + (target ? trunksInMiddle(s.pos, target) * 2.5 : 0);
+    if (!best || cost < best.cost) best = { ...s, cost };
+  }
+  return best;
+}
+
 function flyTo(p, view = null) {
   const f = p.front;
   let target, pos;
+  const at = (q, h) => to3(q[0], q[1], h);
+  const along = (o, d, n, a, b) => [o[0] + d[0] * a + n[0] * b, o[1] + d[1] * a + n[1] * b];
   if (view && f) {
-    // Stand on the far side of the street at eye height, looking at the shop.
+    // Stand on the far side of the street at eye height, looking at the shop, between the trees.
+    const stands = [];
+    let points;
     if (view.corner) {
       const { V, nD } = view.corner;
-      target = to3(V[0] + nD[0] * 1.5, V[1] + nD[1] * 1.5, 1.95);
-      pos = to3(V[0] + nD[0] * 14, V[1] + nD[1] * 14, 2.0);
+      target = at([V[0] + nD[0] * 1.5, V[1] + nD[1] * 1.5], 1.95);
+      for (const turn of [0, 0.18, -0.18, 0.35, -0.35]) for (const dist of [14, 11, 17]) {
+        const c = Math.cos(turn), s2 = Math.sin(turn), dd = [nD[0] * c - nD[1] * s2, nD[0] * s2 + nD[1] * c];
+        stands.push({ pos: at([V[0] + dd[0] * dist, V[1] + dd[1] * dist], 2.0), cost: Math.abs(turn) * 1.2 + Math.abs(dist - 14) * 0.08 });
+      }
+      points = [0.6, 2.2, 3.7].flatMap((h) => [-3, 0, 3].map((a) => at([V[0] - nD[1] * a * 0.7 + nD[0] * 0.5, V[1] + nD[0] * a * 0.7 + nD[1] * 0.5], h)));
     } else {
-      const { o, d, n } = view.site;
+      const { o, d, n, W } = view.site;
       const back = Math.max(12, Math.min(19, f.street + 5));
-      target = to3(o[0] + n[0] * 1.5, o[1] + n[1] * 1.5, 1.95);
-      pos = to3(o[0] + n[0] * back + d[0] * 4.5, o[1] + n[1] * back + d[1] * 4.5, 2.0);
+      target = at(along(o, d, n, 0, 1.5), 1.95);
+      for (const lat of [4.5, -4.5, 1.5, -1.5, 8, -8, 12, -12]) for (const b of [back, back - 3, back + 3, back + 7]) {
+        stands.push({ pos: at(along(o, d, n, lat, b), 2.0), cost: Math.abs(lat - 4.5) * 0.05 + Math.abs(b - back) * 0.06 });
+      }
+      points = [0.8, 2.2, 3.7].flatMap((h) => [-0.35, 0, 0.35].map((a) => at(along(o, d, n, a * W, 0.6), h)));
     }
+    pos = bestStand(stands, points, target).pos;
     fly({ pos, target });
     return;
   }
@@ -572,10 +790,18 @@ function flyTo(p, view = null) {
     const mid = to3(f.mid[0], f.mid[1], 0);
     const n = new THREE.Vector3(f.n[0], 0, -f.n[1]);
     const u = new THREE.Vector3(f.dir[0], 0, -f.dir[1]);
-    // Stand in the street, a little to one side, at about second-floor height.
+    // Stand in the street, a little to one side, at about second-floor height; go higher or wider
+    // where the street trees would hide the building.
     target = mid.clone().add(new THREE.Vector3(0, 3.2, 0)).addScaledVector(n, 2.2);
     const back = Math.max(19, Math.min(36, f.street + 10));
-    pos = mid.clone().addScaledVector(n, back).addScaledVector(u, 8).add(new THREE.Vector3(0, 7.5, 0));
+    const stands = [];
+    for (const h of [7.5, 11, 15, 20, 26]) for (const s2 of [8, -8, 0, 16, -16]) for (const m of [1, 1.35]) {
+      stands.push({ pos: mid.clone().addScaledVector(n, back * m).addScaledVector(u, s2).add(new THREE.Vector3(0, h, 0)),
+        cost: (h - 7.5) * 0.07 + Math.abs(s2 - 8) * 0.03 + (m - 1) * 2 });
+    }
+    const top = Math.max(3, f.h || f.b.h);
+    const points = [0.3, 0.65].flatMap((k) => [-0.35, 0, 0.35].map((a) => mid.clone().addScaledVector(u, a * f.len).addScaledVector(n, 0.3).add(new THREE.Vector3(0, top * k, 0))));
+    pos = bestStand(stands, points).pos;
   } else {
     const [cx, cy] = polyCentroid(p.poly);
     target = to3(cx, cy, 0);
@@ -1174,22 +1400,6 @@ function bladeSign(ctx, parent, x, y, z, kit, look) {
   ctx.blades.push(arm);
 }
 
-function tree(x, z) {
-  const g = new THREE.Group();
-  const trunk = new THREE.Mesh(new THREE.CylinderGeometry(0.14, 0.2, 3.2, 7), std(0x5a4636));
-  trunk.position.y = 1.6;
-  const crown = new THREE.Mesh(new THREE.IcosahedronGeometry(2.3, 1), std(DARK ? 0x2f4a32 : 0x5f7d4f, { flatShading: true }));
-  crown.position.y = 4.9;
-  crown.scale.set(1, 0.85, 1);
-  const crown2 = crown.clone();
-  crown2.scale.set(0.7, 0.6, 0.7);
-  crown2.position.set(0.9, 5.9, -0.4);
-  g.add(trunk, crown, crown2);
-  g.traverse((o) => { if (o.isMesh) { o.castShadow = true; o.receiveShadow = true; } });
-  g.position.set(x, 0, z);
-  return g;
-}
-
 function sidewalk(parent, x0, x1, z0, z1) {
   const tex = canvasTex(256, 64, (g, w, h) => {
     g.fillStyle = DARK ? '#3a352d' : '#ece4d2'; g.fillRect(0, 0, w, h);
@@ -1562,7 +1772,7 @@ function buildStorefront(kit, p) {
     ground.geometry = next;
   };
 
-  // The street in front of the site: sidewalk, curb, two trees.
+  // The street in front of the site: sidewalk and curb. (The trees are the city's, already standing.)
   const site = res.site;
   const sf = frame(site.o, site.d, site.n);
   const pg = sf.g;
@@ -1570,16 +1780,24 @@ function buildStorefront(kit, p) {
   const W = site.W;
   const curb = Math.max(site.front + 1.2, Math.min(f.street - 4.2, site.front + 6));
   sidewalk(pg, -W / 2 - 6, W / 2 + 6, curb - 2.4, curb);
-  // Trees at the curb; at a corner, only down the street, out of the view from the corner.
-  const farSide = isFlipped(site.d, site.n) ? -1 : 1;
-  for (const s2 of variant === 'corner' ? [farSide] : [-1, 1]) pg.add(tree(s2 * (W / 2 + 2.6), curb - 0.7));
 
   // On the sidewalk, or on the porch. (The porch site shares the porch's frame, so its local x
   // positions, like the door's xd, carry over.)
   const props = [];
   const onPorch = !!res.porch;
   const baseY = onPorch ? res.deckH : 0;
-  const placeOn = (obj, x, y, z, rotY = 0) => { obj.position.set(x, y, z); obj.rotation.y = rotY; obj.scale.setScalar(0.001); pg.add(obj); props.push(obj); };
+  // Props make room for the trees: nothing goes down within a metre of a trunk.
+  pg.updateMatrixWorld(true);
+  const trunks = (three.trees || []).filter((t) => Math.hypot(t.x - site.o[0], t.y - site.o[1]) < W + 20);
+  const clear = (x, z) => {
+    const w = pg.localToWorld(new THREE.Vector3(x, 0, z));
+    return trunks.every((t) => Math.hypot(t.x - w.x, t.y + w.z) > 1 + t.T);
+  };
+  const placeOn = (obj, x, y, z, rotY = 0) => {
+    if (!clear(x, z)) return false;
+    obj.position.set(x, y, z); obj.rotation.y = rotY; obj.scale.setScalar(0.001); pg.add(obj); props.push(obj);
+    return true;
+  };
   const span = (onPorch ? W - 1.2 : W) - 1.6;
   const nT = onPorch ? Math.min(kit.tables, 2) : kit.tables;
   const tables = [];
@@ -1587,8 +1805,7 @@ function buildStorefront(kit, p) {
     let x = -span / 2 + (span * (i + 0.5)) / Math.max(nT, 1);
     if (onPorch && Math.abs(x - res.xd) < 1.3) x += x < res.xd ? -0.9 : 0.9;
     const z = onPorch ? 1.15 + (i % 2) * 0.5 : site.front + 0.9 + (i % 2) * 0.6;
-    placeOn(table(kit.id === 'bistro' ? 0xf4ead6 : 0xf2ece0), x, baseY, z, Math.PI / 2);
-    tables.push([x, z]);
+    if (placeOn(table(kit.id === 'bistro' ? 0xf4ead6 : 0xf2ece0), x, baseY, z, Math.PI / 2)) tables.push([x, z]);
   }
   const walkZ = site.front + (onPorch ? 0.4 : 0.7);
   if (kit.props === 'cafe') { placeOn(aFrame('espresso'), W / 2 - 0.4, 0, walkZ + 0.6, -0.4); placeOn(planter(), -W / 2 + 0.2, 0, walkZ); }
@@ -2051,7 +2268,6 @@ function buildHero801(p) {
   hedgeRun(g, hu, hv, hu, 2.4, M, rng);          // along Stockley, from the corner to the walk
   hedgeRun(g, hu, 4.6, hu, vMax - 0.6, M, rng);  // along Stockley, past the walk
   hedgeRun(g, hu, hv, uMin + 1, hv, M, rng);     // along Raleigh
-  for (const [tu, tv] of [[16.5, 14.5], [-13, -14.2]]) { const t = tree(0, 0); t.position.set(tu, 0, -tv); t.scale.setScalar(1.35); g.add(t); }
 
   return { group: g, pick, winList, door, mats: M, lot: { hu, hv } };
 }
@@ -2181,8 +2397,9 @@ function heroView(mode) {
     const [px, py] = huv(h, 27.5, -10.5), [tx, ty] = huv(h, 5.5, 0.5);
     return { pos: to3(px, py, 4.4), target: to3(tx, ty, 2.4) };
   }
-  const [px, py] = huv(h, 34, -24), [tx, ty] = huv(h, 2, 0.5);
-  return { pos: to3(px, py, 12), target: to3(tx, ty, 4) };
+  // Over the street trees on Raleigh, which stand between the corner and the porch.
+  const [px, py] = huv(h, 36, -22), [tx, ty] = huv(h, 2, 0.5);
+  return { pos: to3(px, py, 17), target: to3(tx, ty, 3.5) };
 }
 
 // ── Frame ──
