@@ -167,6 +167,54 @@ nav a:hover, nav a.active {
   margin-bottom: 2rem;
 }
 
+/* The hero film: 801 Stockley's porch coming alive, from the parcel explorer. */
+.hero-film {
+  margin: clamp(2rem, 5vw, 3rem) auto 0;
+}
+
+.hero-film-frame {
+  position: relative;
+  border: 1px solid var(--rule-strong);
+  background: var(--paper-mid);
+}
+
+.hero-film video {
+  display: block;
+  width: 100%;
+  height: auto;
+  aspect-ratio: 16 / 9;
+}
+
+.hero-film-toggle {
+  position: absolute;
+  right: 0.75rem;
+  bottom: 0.75rem;
+  font-family: var(--mono);
+  font-size: 0.62rem;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: #f3ede0;
+  background: rgba(26,23,20,0.62);
+  border: 1px solid rgba(243,237,224,0.35);
+  padding: 0.4rem 0.7rem;
+  cursor: pointer;
+}
+
+.hero-film-toggle:hover { background: rgba(26,23,20,0.8); }
+.hero-film-toggle:focus-visible { outline: 2px solid var(--gold); outline-offset: 2px; }
+
+.hero-film figcaption {
+  font-family: var(--mono);
+  font-size: 0.7rem;
+  line-height: 1.6;
+  letter-spacing: 0.02em;
+  color: rgba(var(--ink-rgb),0.7);
+  margin-top: 0.75rem;
+  max-width: 62ch;
+}
+
+.hero-film figcaption a { color: var(--gold); }
+
 /* ── Typography ── */
 h1, h2, h3, h4 {
   font-family: var(--display);
