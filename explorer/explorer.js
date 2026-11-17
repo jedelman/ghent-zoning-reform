@@ -2827,116 +2827,108 @@ function heroView740(mode) {
   return { pos: to3(px, py, 21), target: to3(tx, ty, 7) };
 }
 
-// ── 1012 Colley Avenue (case study): the end house of a 1908 row, its back to Colley ──
+// ── 1012 Colley Avenue (case study): the end house of a 1908 row ──
 // The city's footprint is one polygon for the whole row: 1012 and 1014 Colley and 741–747 Graydon, an L
 // around the corner. The build cuts out 1012's piece (data/scripts/build_explorer.py), and this model
-// replaces only that. In its own axes (u toward Colley, v along it, + to the south) the piece's side on
-// Colley is 9.2 m (v −3.2…6.0), 6.6 m deep; behind 1014 it runs on to v −6.4. The row is 9.7 m high.
-// The house doesn't face Colley (Jason, who knows it, 2026-11-17): 1014 on the corner is entered from
-// Graydon, and 1012's door faces south, off a fenced side yard. The row's side on Colley is a nearly blank
-// wall, with few windows. The assessor's photos (2007, August 2025, June 2026) show painted white brick,
-// and at the door a stoop with dark railings, a black door with a transom beside a wide window, dark
-// shutters upstairs, a brick pier and railing at the fence. The FY2026 record: built 1908, an attached
-// single-family house, 2,028 sq ft, on a 1,149 sq ft lot.
+// replaces only that. In its own axes (u toward Colley, v along it, + to the south) the piece's front is
+// 9.2 m on Colley (v −3.2…6.0), 6.6 m deep; behind 1014's entry bay it runs on to v −6.4. The row is 9.7 m
+// high. The assessor's photos (2007, August 2025, June 2026) show painted white brick, two floors over a
+// raised base, a raised stoop with dark railings, a black door with a transom, a wide window under a flat
+// arch, dark shutters upstairs, a cornice, dormers in the roof, and at the south end a porch behind brick
+// piers. The FY2026 record: built 1908, an attached single-family house, 2,028 sq ft, on a 1,149 sq ft lot.
 const H1012 = {
   c: [-128.4, 233.26], U: [-0.916, 0.4], V: [-0.4, -0.916],
-  front: 3.4, back: -3.2, v0: -3.2, vN: -6.4, uN: 1.8, v1: 6.0, yard: 9.8, fenceU: 3.7,
-  baseY: 0.9, f2: 4.3, eave: 7.4, top: 9.7, stoopV: 1.2,
-  // What a shop would need on Colley: a window and a door cut into the blank wall, steps up to the door.
-  shop: { win: -0.6, winW: 2.6, door: 2.0, doorW: 1.05 },
+  front: 3.4, back: -3.2, v0: -3.2, vN: -6.4, uN: 1.8, v1: 6.0,
+  baseY: 0.9, f2: 4.3, eave: 7.4, top: 9.7, stoop: 1.2, porchIn: 1.9, porchV: [2.4, 6.0],
 };
 function buildHero1012(p) {
   const h = H1012;
   const M = heroMatsFor({ brick: '#f7f4ee', mortar: '#e9e4da', roof: '#4a4d51', trim: '#fbf9f4', base: '#d6cdbd' });
   const iron = new THREE.MeshLambertMaterial({ color: dk('#23272b') });
   const tan = heroMatsFor({ brick: '#c9ab86', mortar: '#b39373', roof: '#4a4d51', trim: '#f7f3ea', base: '#b39373' }).wall;
-  const dark = { white: iron };   // railRun draws in M.white; the railings and fence here are dark iron
+  const dark = { white: iron };   // railRun draws in M.white; the railings here are painted dark
   const g = heroGroup(h); g.userData.trim = M.trim; g.userData.brackets = false;
   const pick = [];
   const wall = (...a) => { const m = hbox(g, ...a, M.wall, 2.4); m.userData.gpin = p.gpin; pick.push(m); return m; };
-  const { front: uf, back: ub, v0, vN, uN, v1, baseY: y0, f2, eave: e, top, yard, fenceU: fu, stoopV: sv } = h;
-  // The house, and its piece behind 1014, up to the row's flat roof.
-  hbox(g, ub, uf, v0, v1, 0, y0, M.base);
-  wall(ub, uf, v0, v1, y0, e);
-  wall(ub, uN, vN, v0, 0, top);
+  const { front: uf, back: ub, v0, vN, uN, v1, baseY: y0, f2, eave: e, top, stoop: sd, porchIn: ui } = h;
+  const [pv0, pv1] = h.porchV;
+  // The house: the front block, its piece behind 1014's entry bay, and the south porch cut into the corner.
+  hbox(g, ub, uf, v0, pv0, 0, y0, M.base);
+  wall(ub, uf, v0, pv0, y0, e);
+  hbox(g, ub, ui, pv0, v1, 0, y0, M.base);
+  wall(ub, ui, pv0, v1, y0, e);
+  wall(ui, uf, pv0, v1, f2, e);                      // the second floor runs on over the porch
+  wall(ub, uN, vN, v0, 0, top);                      // behind 1014's bay, up to the row's flat roof
+  // The cornice and a low hip roof that meets the row's height, with two dormers facing Colley.
   hbox(g, ub - 0.2, uf + 0.28, v0 - 0.05, v1 + 0.28, e, e + 0.32, M.trim);
   hipRoof(g, ub, uf, v0, v1, e + 0.32, 0.2, 0.55, M.roof);
-  // The side on Colley: a nearly blank wall, two small windows upstairs.
-  for (const v of [-1.6, 3.4]) hwin(g, 'u+', uf, v, f2 + 0.9, f2 + 2.1, 0.75, M, null);
-  // The front that faces south, onto the side yard: the wide window, the black door with its transom and
-  // a lamp, dark shutters upstairs. (hwin's 'v+' face: at = v of the wall, along = u.)
-  hwin(g, 'v+', v1, -1.4, y0 + 0.45, y0 + 2.55, 1.9, M, null);
-  hbox(g, -2.45, -0.35, v1, v1 + 0.14, y0 + 2.7, y0 + 2.95, M.trim);
-  hbox(g, 0.35, 1.65, v1, v1 + 0.12, y0, y0 + 3.05, M.trim);
-  const door = hbox(g, 0.5, 1.5, v1 + 0.1, v1 + 0.16, y0, y0 + 2.3, new THREE.MeshLambertMaterial({ color: dk('#1d2024') }));
-  hwin(g, 'v+', v1, 1.0, y0 + 2.42, y0 + 2.88, 0.9, M, null);
-  hbox(g, 1.85, 2.0, v1 + 0.12, v1 + 0.3, y0 + 1.9, y0 + 2.3, iron);
-  for (const [u, w] of [[-1.4, 1.0], [1.0, 0.9]]) {
-    hwin(g, 'v+', v1, u, f2 + 0.55, f2 + 2.35, w, M, null);
-    for (const sd of [-1, 1]) hbox(g, u + sd * (w / 2 + 0.16) - 0.22, u + sd * (w / 2 + 0.16) + 0.22, v1 + 0.02, v1 + 0.08, f2 + 0.5, f2 + 2.4, iron);
+  for (const v of [-1.3, 3.6]) {   // set forward on the slope so each window clears the roof
+    hbox(g, uf - 2.0, uf - 0.7, v - 0.65, v + 0.65, e + 0.3, e + 2.0, M.wall);
+    gableRoof(g, uf - 2.0, uf - 0.7, v - 0.65, v + 0.65, e + 2.0, 0.5, 0.12, M);
+    hwin(g, 'u+', uf - 0.7, v, e + 1.0, e + 1.8, 0.7, M, null);
   }
-  // The stoop along that front, dark railings, steps down toward Colley to the gate in the fence.
-  hbox(g, -2.7, 2.3, v1, v1 + sv, 0, y0 - 0.06, M.base);
-  hbox(g, -2.7, 2.3, v1, v1 + sv, y0 - 0.06, y0, M.deck);
-  railRun(g, -2.6, v1 + sv - 0.08, 2.2, v1 + sv - 0.08, y0, dark, 0.9);
-  railRun(g, -2.6, v1 + 0.1, -2.6, v1 + sv - 0.08, y0, dark, 0.9);
+  // First floor: the wide window under its flat arch, the door with its transom and a lamp.
+  const winList = [];
+  hwin(g, 'u+', uf, -1.3, y0 + 0.45, y0 + 2.55, 2.0, M, winList);
+  hbox(g, uf, uf + 0.14, -2.55, -0.05, y0 + 2.7, y0 + 2.95, M.trim);
+  hbox(g, uf, uf + 0.12, 0.35, 1.65, y0, y0 + 3.05, M.trim);
+  const door = hbox(g, uf + 0.1, uf + 0.16, 0.5, 1.5, y0, y0 + 2.3, new THREE.MeshLambertMaterial({ color: dk('#1d2024') }));
+  hwin(g, 'u+', uf, 1.0, y0 + 2.42, y0 + 2.88, 0.9, M, null);   // the transom
+  hbox(g, uf + 0.12, uf + 0.3, 1.85, 2.0, y0 + 1.9, y0 + 2.3, iron);
+  // Second floor: three windows with dark shutters.
+  for (const [v, w] of [[-1.3, 1.0], [1.0, 0.9], [4.2, 1.0]]) {
+    hwin(g, 'u+', uf, v, f2 + 0.55, f2 + 2.35, w, M, null);
+    for (const s of [-1, 1]) hbox(g, uf + 0.02, uf + 0.08, v + s * (w / 2 + 0.16) - 0.22, v + s * (w / 2 + 0.16) + 0.22, f2 + 0.5, f2 + 2.4, iron);
+  }
+  // The stoop across the front, dark railings, steps down to the walk at the door.
+  hbox(g, uf, uf + sd, v0 + 0.15, pv0, 0, y0 - 0.06, M.base);
+  hbox(g, uf, uf + sd, v0 + 0.15, pv0, y0 - 0.06, y0, M.deck);
+  railRun(g, uf + sd - 0.08, v0 + 0.2, uf + sd - 0.08, 0.35, y0, dark, 0.9);
+  railRun(g, uf + sd - 0.08, 1.65, uf + sd - 0.08, pv0 - 0.05, y0, dark, 0.9);
+  railRun(g, uf + 0.1, v0 + 0.2, uf + sd - 0.08, v0 + 0.2, y0, dark, 0.9);
   const nSteps = 4, rise = y0 / nSteps;
-  for (let i = 1; i <= nSteps; i++) hbox(g, 2.3, 2.3 + (nSteps - i + 1) * 0.3, v1 + 0.1, v1 + 1.1, 0, i * rise, M.deck);
-  // The fenced yard: dark railings between brick piers along Colley and the lot's south line, the gate at
-  // the foot of the steps.
-  for (const v of [v1 - 0.05, v1 + 1.4, yard]) hbox(g, fu - 0.22, fu + 0.22, v - 0.22, v + 0.22, 0, 1.45, tan);
-  railRun(g, fu, v1 + 0.2, fu, v1 + 1.15, 0, dark, 1.2);           // the gate
-  railRun(g, fu, v1 + 1.65, fu, yard - 0.25, 0, dark, 1.2);
-  railRun(g, ub + 0.6, yard, fu - 0.25, yard, 0, dark, 1.2);
-  hbox(g, ub + 0.4, ub + 0.6, yard - 0.1, yard + 0.1, 0, 1.3, tan);
-  // Plantings along the blank wall and in the yard.
+  for (let i = 1; i <= nSteps; i++) hbox(g, uf + sd, uf + sd + (nSteps - i + 1) * 0.3, 0.4, 1.6, 0, i * rise, M.deck);
+  // The south porch: brick piers at its corners, a floor on a brick base, dark railings, a window at its back.
+  hbox(g, ui, uf, pv0, v1, 0, y0 - 0.06, tan);
+  hbox(g, ui, uf, pv0, v1, y0 - 0.06, y0, M.deck);
+  for (const v of [pv0 + 0.25, v1 - 0.25]) hbox(g, uf - 0.5, uf, v - 0.25, v + 0.25, 0, f2, tan);
+  railRun(g, uf - 0.25, pv0 + 0.55, uf - 0.25, v1 - 0.55, y0, dark, 0.9);
+  railRun(g, ui + 0.1, v1 - 0.2, uf - 0.55, v1 - 0.2, y0, dark, 0.9);
+  hwin(g, 'u+', ui, 4.2, y0 + 0.45, y0 + 2.55, 1.1, M, winList);
+  // Plantings along the stoop and in the side yard, the walk to the steps.
   const rng = rngFor('1012-hero');
-  hedgeRun(g, uf + 0.6, v0 + 0.3, uf + 0.6, v1 - 0.4, M, rng, 0.85, 0.7);
-  hedgeRun(g, ub + 0.9, yard - 0.6, fu - 0.7, yard - 0.6, M, rng, 0.9, 0.8);
-  return { group: g, pick, winList: [], door, mats: M };
+  hedgeRun(g, uf + sd + 0.55, v0 + 0.3, uf + sd + 0.55, 0.0, M, rng, 0.8, 0.7);
+  hedgeRun(g, uf + sd + 0.55, 2.0, uf + 0.6, v1 + 0.6, M, rng, 0.8, 0.7);
+  hedgeRun(g, uf - 0.4, v1 + 1.2, ub + 0.4, v1 + 1.2, M, rng, 1.1, 0.9);
+  hbox(g, uf + sd + 1.2, uf + sd + 3.4, 0.45, 1.55, 0, 0.03, M.path);
+  return { group: g, pick, winList, door, mats: M };
 }
 function heroTransform1012(kit, p) {
-  const h = H1012, uf = h.front, y0 = h.baseY, S = h.shop, M = p.hero.mats;
-  // The openings a shop on Colley would need, cut into the blank wall, with steps up to the new door.
-  // They arrive with the shop; the house's own south door keeps its place.
-  const cut = new THREE.Group();
-  hwin(cut, 'u+', uf, S.win, y0 + 0.3, y0 + 2.6, S.winW, M, []);    // shop glass: it lights with the kit
-  hbox(cut, uf, uf + 0.14, S.win - S.winW / 2 - 0.25, S.win + S.winW / 2 + 0.25, y0 + 2.75, y0 + 3.0, M.trim);
-  hbox(cut, uf, uf + 0.12, S.door - S.doorW / 2 - 0.15, S.door + S.doorW / 2 + 0.15, y0, y0 + 3.0, M.trim);
-  const newDoor = hbox(cut, uf + 0.1, uf + 0.16, S.door - S.doorW / 2, S.door + S.doorW / 2, y0, y0 + 2.35, new THREE.MeshLambertMaterial({ color: dk('#1d2024') }));
-  hwin(cut, 'u+', uf, S.door, y0 + 2.47, y0 + 2.88, S.doorW - 0.1, M, []);
-  const nSteps = 4, rise = y0 / nSteps;
-  hbox(cut, uf, uf + 1.1, S.door - 0.75, S.door + 0.75, 0, y0, M.base);
-  for (let i = 1; i <= nSteps; i++) hbox(cut, uf + 1.1, uf + 1.1 + (nSteps - i + 1) * 0.3, S.door - 0.6, S.door + 0.6, 0, i * rise, M.deck);
-  cut.visible = false;
-  const homeDoor = p.hero.door;
-  p.hero.door = newDoor;   // the shop's door is the one that glows
-  const built = caseTransform(kit, p, {
+  const h = H1012, uf = h.front, y0 = h.baseY, f2 = h.f2, sd = h.stoop;
+  const [pv0, pv1] = h.porchV;
+  return caseTransform(kit, p, {
     h,
-    letters: [[uf + 0.3, S.win, y0 + 1.45, 1.3]],
-    awnings: [[uf + 0.05, S.win, y0 + 3.15, S.winW + 0.4]],
-    lanterns: [[uf + 0.25, S.door - 0.75, y0 + 2.0], [uf + 0.25, S.door + 0.75, y0 + 2.0]],
-    light: [uf + 1.0, S.win, y0 + 2.2],
-    tables: [[uf + 1.3, -2.4, 0], [uf + 1.3, 0.4, 0]],
-    cart: [uf + 1.0, S.win, 0],
-    benches: [[uf + 1.1, S.win, 0]],
-    board: [uf + 3.0, 3.6],
-    greeter: [uf + 0.75, S.door, y0],
-    walkers: [[8.2, -16, uf + 2.9, S.door - 0.4], [8.6, 15, uf + 3.1, S.door + 0.5]],
+    letters: [[uf + 0.3, -1.3, y0 + 1.5, 1.2]],
+    sign: { u: uf - 0.25, v: (pv0 + pv1) / 2, y: f2 },
+    awnings: [[uf + 0.05, -1.3, y0 + 3.05, 2.3]],
+    lanterns: [[uf + 0.25, 0.25, y0 + 2.0], [uf + 0.25, 1.75, y0 + 2.0]],
+    light: [uf + 1.0, 0, y0 + 2.2],
+    tables: [[uf + 0.62, -2.35, y0], [h.porchIn + 0.75, 4.4, y0]],
+    cart: [uf + 0.62, -1.4, y0],
+    benches: [[uf + 0.62, -1.3, y0]],
+    board: [uf + sd + 2.6, 2.3],
+    bulbs: [[uf - 0.25, pv0 + 0.5, uf - 0.25, pv1 + 0.2, f2 - 0.2]],
+    greeter: [uf + 0.6, 1.0, y0],
+    walkers: [[8.2, -16, uf + sd + 2.4, 0.9], [8.6, 15, uf + sd + 2.6, 1.3]],
   });
-  built.root.add(cut);
-  built.tweens.unshift({ t0: 0, t1: 0.04, fn: (k) => { cut.visible = k > 0; } });
-  const clean = built.cleanup;
-  built.cleanup = () => { clean(); p.hero.door = homeDoor; };
-  return built;
 }
 function heroView1012(mode) {
   const h = H1012;
-  // From the south-west, across Colley: the blank side on Colley and, beyond the fence, the door that faces
-  // south, with the stand of trees at the corner behind the house rather than in front of it.
-  if (mode === 'street') { const [px, py] = huv(h, 17.5, 21), [tx, ty] = huv(h, 1.8, 2.6); return { pos: to3(px, py, 2.4), target: to3(tx, ty, 4.0) }; }
-  const [px, py] = huv(h, 22, 24), [tx, ty] = huv(h, 0.5, 2.5);
-  return { pos: to3(px, py, 14), target: to3(tx, ty, 4.5) };
+  // From the south-west, across Colley: the house, its stoop and porch, with the stand of trees at the
+  // corner beyond it rather than in front.
+  if (mode === 'street') { const [px, py] = huv(h, 23, 10), [tx, ty] = huv(h, 3.4, 1.2); return { pos: to3(px, py, 2.3), target: to3(tx, ty, 4.6) }; }
+  const [px, py] = huv(h, 27, 15), [tx, ty] = huv(h, 1, 1);
+  return { pos: to3(px, py, 14), target: to3(tx, ty, 5) };
 }
 
 // The buildings drawn by hand, by GPIN: 801 Stockley Gardens and the case studies, which also get a page.
