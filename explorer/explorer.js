@@ -140,7 +140,17 @@ function buildPanel() {
     o.textContent = titleCase(p.address);
     pick.append(o);
   }
-  const cases = Object.keys(HEROES).filter((g) => HEROES[g].page && parcels.has(g));
+  const cases = Object.keys(HEROES).filter((g) => HEROES[g].page && parcels.has(g))
+    .sort((a, b) => parseInt(parcels.get(a).address, 10) - parseInt(parcels.get(b).address, 10));   // by street number, as the pages list them
+  // The case studies, first in the intro: one tap goes to each (the hash link selects the lot and flies there).
+  if (cases.length) {
+    for (const g of cases) {
+      const li = document.createElement('li'), a = document.createElement('a');
+      a.href = `#p=${g}`; a.textContent = titleCase(parcels.get(g).address);
+      li.append(a); $('case-list').append(li);
+    }
+    $('case-links').hidden = false;
+  }
   if (cases.length) {
     const group = document.createElement('optgroup');
     group.label = 'Case studies';
